@@ -1,0 +1,13 @@
+[package]
+name    = "eliciunt"
+version = "0.1.0"
+edition = "2026"
+
+[dependencies]
+eframe    = "0.27"
+egui      = "0.27"
+egui_plot = "0.27"
+rfd       = "0.14"
+
+[profile.release]
+opt-level = 3
