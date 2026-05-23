@@ -1,3 +1,20 @@
+/**
+ * @file      ui/hex.rs
+ * @brief     Virtualised hex-dump panel with bookmark and drag-selection support.
+ * @details   Renders only the visible rows of a binary file using egui's
+ *            show_rows, overlays bookmark bands and the active drag selection,
+ *            and tracks raw pointer events to build multi-row byte selections
+ *            that are returned to the caller on mouse release.
+ *
+ * @copyright  (C) Core Labs
+ *             All rights reserved.
+ *
+ * @author     Manoel Serafim
+ * @email      manoel.serafim@proton.me
+ * @github     https://github.com/manoel-serafim
+ * SPDX-License-Identifier: GPL-3.0
+ */
+
 use eframe::egui;
 use egui::{Color32, PointerButton, Rect, Rounding, Sense, Stroke, Vec2};
 
@@ -34,8 +51,6 @@ pub fn render_hex_view(
             (s / HEX_COLUMNS)..=((s + l).saturating_sub(1) / HEX_COLUMNS)
         });
 
-    // Disable the scroll area's own drag-to-scroll while we own the pointer
-    // for a selection, so the two gestures don't fight each other.
     let is_selecting = selection.drag_start.is_some();
 
     let mut scroll_area = egui::ScrollArea::vertical()
@@ -63,7 +78,6 @@ pub fn render_hex_view(
                 let byte_end   = (byte_start + HEX_COLUMNS).min(file_data.len());
                 let line_bytes = &file_data[byte_start..byte_end];
 
-                // ── hex text ──────────────────────────────────────────────
                 let mut hex = format!("{:08X}  ", byte_start);
                 let mut asc = String::with_capacity(HEX_COLUMNS);
                 for (i, b) in line_bytes.iter().enumerate() {
@@ -141,11 +155,6 @@ pub fn render_hex_view(
         },
     );
 
-    // ── Raw-pointer drag tracking ─────────────────────────────────────────
-    //
-    // We read pointer state directly from ui.input() so a single gesture
-    // spans as many rows as needed.  We guard against the dialog being open
-    // so that clicking a colour swatch doesn't start a new selection.
     let inner_rect = output.inner_rect;
 
     if !dialog_open {
@@ -161,7 +170,6 @@ pub fn render_hex_view(
             let held          = pointer.button_down(PointerButton::Primary);
             let just_released = pointer.button_released(PointerButton::Primary);
 
-            // Start selection only when the click lands inside the hex panel.
             if just_pressed {
                 if let Some(pos) = pointer.interact_pos() {
                     if inner_rect.contains(pos) {
@@ -172,7 +180,6 @@ pub fn render_hex_view(
                 }
             }
 
-            // Update end every frame while button is held, even outside panel.
             if held && selection.drag_start.is_some() {
                 if let Some(pos) = pointer.hover_pos() {
                     let line     = y_to_line(pos);
@@ -183,12 +190,10 @@ pub fn render_hex_view(
                 }
             }
 
-            // Finalise on release.
             if just_released && selection.drag_start.is_some() {
                 if let Some(norm) = selection.normalised() {
                     finished_selection = Some(norm);
                 }
-                // Keep drag_start set so blue band persists until dialog clears it.
             }
         });
     }

@@ -1,3 +1,19 @@
+/**
+ * @file      ui/statistics.rs
+ * @brief     Global randomness-test results and per-metric statistics panel.
+ * @details   Displays Kolmogorov-Smirnov, chi-squared, and Wald-Wolfowitz
+ *            test outcomes alongside windowed metric summary statistics and
+ *            an interpretation guide for all reported values.
+ *
+ * @copyright  (C) Core Labs
+ *             All rights reserved.
+ *
+ * @author     Manoel Serafim
+ * @email      manoel.serafim@proton.me
+ * @github     https://github.com/manoel-serafim
+ * SPDX-License-Identifier: GPL-3.0
+ */
+
 use eframe::egui;
 use egui::RichText;
 
@@ -119,10 +135,10 @@ pub fn render_statistics_tab(
         ui.add_space(8.0);
 
         let metric_rows = [
-            ("Entropy",            "bits / symbol", "[0, 8]",          &stats.entropy_stats),
-            ("Chi² statistic",     "dimensionless", "df=255, E=w/256", &stats.chi2_stats),
-            ("Serial correlation", "ρ",             "[−1, 1]",         &stats.serial_stats),
-            ("Hamming weight",     "bits / byte",   "[0, 8]",          &stats.hamming_stats),
+            ("Entropy",              "bits / symbol", "[0, 8]",    &stats.entropy_stats),
+            ("Reduced χ² (χ²/df)",  "dimensionless", "E = 1.0",   &stats.chi2_stats),
+            ("Serial correlation",  "ρ",             "[−1, 1]",   &stats.serial_stats),
+            ("Hamming weight",      "bits / byte",   "[0, 8]",    &stats.hamming_stats),
         ];
 
         egui::Grid::new("metric_stats_grid")
@@ -155,7 +171,8 @@ pub fn render_statistics_tab(
         let guide_entries: &[(&str, &str)] = &[
             ("Entropy ≈ 8 bits/symbol",  "Near-maximal uncertainty — typical of compressed or encrypted data."),
             ("Entropy ≪ 8 bits/symbol",  "Significant redundancy — structured, sparse, or padding regions."),
-            ("Chi² p-value ≪ 0.05",      "Byte distribution deviates from uniform — likely structured content."),
+            ("Reduced χ² ≈ 1.0",     "Byte distribution matches uniform — baseline for random/encrypted data."),
+            ("Reduced χ² ≫ 1.0",     "Byte distribution deviates from uniform — likely structured content."),
             ("Serial |ρ| ≫ 0",           "Adjacent bytes are linearly correlated — sequential structure present."),
             ("Hamming weight ≈ 4.0",      "Expected for uniform random bytes (bit probability ≈ 0.5)."),
             ("Hamming weight ≈ 8.0",      "All bits set — consistent with erased flash (0xFF fill)."),

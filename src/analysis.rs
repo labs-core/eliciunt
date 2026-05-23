@@ -1,7 +1,29 @@
+/**
+ * @file      analysis.rs
+ * @brief     Binary file loading and windowed metric analysis.
+ * @details   Provides file-picker loading of raw binary files and the core
+ *            analysis pipeline that computes per-window entropy, reduced
+ *            chi-squared (chi2/df), serial correlation, Hamming weight, and
+ *            n-gram uniqueness, then classifies regions as anomalous against
+ *            adaptive sigma thresholds.
+ *
+ *            Reduced chi-squared (chi2 / 255) is stored in every plot series
+ *            so the expected baseline for uniform random data is 1.0, making
+ *            y-axis scales human-readable across all window sizes.
+ *
+ * @copyright  (C) Core Labs
+ *             All rights reserved.
+ *
+ * @author     Manoel Serafim
+ * @email      manoel.serafim@proton.me
+ * @github     https://github.com/manoel-serafim
+ * SPDX-License-Identifier: GPL-3.0
+ */
+
 use std::fs;
 use rfd::FileDialog;
 
-use crate::constants::BYTE_RANGE;
+use crate::constants::{BYTE_RANGE, CHI2_DF};
 use crate::math::{chi2_pvalue, ks_uniform_test, runs_test};
 use crate::metrics::{
     compute_chi2, compute_entropy, hamming_weight, ngram_uniqueness, serial_correlation,
@@ -43,16 +65,17 @@ pub fn analyze_binary(data: &[u8], window_size: usize, sigma_threshold: f64) -> 
         if window_end - window_offset < window_size {
             break;
         }
-        let window_slice = &data[window_offset..window_end];
-        let window_chi2  = compute_chi2(window_slice);
-        let offset_f64   = window_offset as f64;
+        let window_slice       = &data[window_offset..window_end];
+        let window_chi2_raw    = compute_chi2(window_slice);
+        let window_chi2_red    = window_chi2_raw / CHI2_DF;
+        let offset_f64         = window_offset as f64;
 
-        result.entropy.push([offset_f64,       compute_entropy(window_slice)]);
-        result.chi2.push([offset_f64,           window_chi2]);
-        result.serial_corr.push([offset_f64,    serial_correlation(window_slice)]);
-        result.hamming.push([offset_f64,         hamming_weight(window_slice)]);
-        result.bigram_scores.push([offset_f64,  ngram_uniqueness(window_slice, 2)]);
-        result.trigram_scores.push([offset_f64, ngram_uniqueness(window_slice, 3)]);
+        result.entropy.push([offset_f64,        compute_entropy(window_slice)]);
+        result.chi2.push([offset_f64,            window_chi2_red]);
+        result.serial_corr.push([offset_f64,     serial_correlation(window_slice)]);
+        result.hamming.push([offset_f64,          hamming_weight(window_slice)]);
+        result.bigram_scores.push([offset_f64,   ngram_uniqueness(window_slice, 2)]);
+        result.trigram_scores.push([offset_f64,  ngram_uniqueness(window_slice, 3)]);
     }
 
     let thresholds = AnomalyThresholds::from_metric_series(
@@ -61,25 +84,25 @@ pub fn analyze_binary(data: &[u8], window_size: usize, sigma_threshold: f64) -> 
         &result.serial_corr,
     );
     for i in 0..result.entropy.len() {
-        let window_chi2    = result.chi2[i][1];
-        let window_entropy = result.entropy[i][1];
-        let window_serial  = result.serial_corr[i][1];
+        let window_chi2_red    = result.chi2[i][1];
+        let window_entropy     = result.entropy[i][1];
+        let window_serial      = result.serial_corr[i][1];
         result.regions.push(RegionInsight {
             offset:      result.entropy[i][0] as usize,
             entropy:     window_entropy,
-            chi2:        window_chi2,
-            chi2_pvalue: chi2_pvalue(window_chi2, 255),
+            chi2:        window_chi2_red,
+            chi2_pvalue: chi2_pvalue(window_chi2_red * CHI2_DF, 255),
             serial_corr: window_serial,
             hamming:     result.hamming[i][1],
-            suspicious:  thresholds.is_suspicious(window_entropy, window_chi2, window_serial, sigma_threshold),
+            suspicious:  thresholds.is_suspicious(window_entropy, window_chi2_red, window_serial, sigma_threshold),
         });
     }
     result.thresholds = thresholds;
 
-    let global_chi2_stat     = compute_chi2(data);
-    let (ks_d, ks_p)         = ks_uniform_test(data);
-    let (runs_z, runs_p)     = runs_test(data);
-    let mean_window_chi2p    = if result.regions.is_empty() {
+    let global_chi2_raw   = compute_chi2(data);
+    let (ks_d, ks_p)      = ks_uniform_test(data);
+    let (runs_z, runs_p)  = runs_test(data);
+    let mean_window_chi2p = if result.regions.is_empty() {
         1.0
     } else {
         result.regions.iter().map(|r| r.chi2_pvalue).sum::<f64>() / result.regions.len() as f64
@@ -91,8 +114,8 @@ pub fn analyze_binary(data: &[u8], window_size: usize, sigma_threshold: f64) -> 
         hamming_stats:     MetricStats::from_series(&result.hamming),
         ks_statistic:      ks_d,
         ks_pvalue:         ks_p,
-        global_chi2:       global_chi2_stat,
-        global_chi2_p:     chi2_pvalue(global_chi2_stat, 255),
+        global_chi2:       global_chi2_raw,
+        global_chi2_p:     chi2_pvalue(global_chi2_raw, 255),
         runs_z_score:      runs_z,
         runs_pvalue:       runs_p,
         mean_window_chi2p,

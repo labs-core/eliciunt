@@ -1,3 +1,18 @@
+/**
+ * @file      ui/widgets.rs
+ * @brief     Shared UI helper widgets and utilities.
+ * @details   Provides the standard card frame used across all panels, a
+ *            reusable PNG export button, and a filename truncation helper.
+ *
+ * @copyright  (C) Core Labs
+ *             All rights reserved.
+ *
+ * @author     Manoel Serafim
+ * @email      manoel.serafim@proton.me
+ * @github     https://github.com/manoel-serafim
+ * SPDX-License-Identifier: GPL-3.0
+ */
+
 use eframe::egui;
 use egui::{Frame, Margin, RichText, Rounding, Stroke, Vec2};
 

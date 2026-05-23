@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui::{Color32, Frame, Margin, RichText, Rounding, Stroke, Vec2};
+use egui::{Color32, Margin, RichText, Rounding, Stroke, Vec2};
 use egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoints, VLine};
 
 use crate::constants::{BYTE_RANGE, PLOT_HEIGHT_PX, UNIFORM_SPIKE_RATIO};

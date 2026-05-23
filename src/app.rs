@@ -592,8 +592,8 @@ impl App {
         if self.show_hex_panel {
             egui::SidePanel::right("hexdump")
                 .resizable(true)
-                .default_width(760.0)
-                .min_width(620.0)
+                .default_width(520.0)
+                .min_width(520.0)
                 .frame(Frame {
                     inner_margin: Margin::same(30.0),
                     outer_margin: Margin::ZERO,
@@ -652,7 +652,6 @@ impl App {
                         );
                         ui.add_space(2.0);
 
-                        // render_hex_view now returns a finished selection.
                         if let Some((sel_start, sel_len)) = render_hex_view(
                             ui,
                             &file.data,

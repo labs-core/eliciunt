@@ -1,3 +1,19 @@
+/**
+ * @file      metrics.rs
+ * @brief     Per-window byte-level metric computations.
+ * @details   Implements Shannon entropy, chi-squared goodness-of-fit,
+ *            Pearson lag-1 circular serial correlation, average Hamming
+ *            weight, and n-gram uniqueness ratio over arbitrary byte slices.
+ *
+ * @copyright  (C) Core Labs
+ *             All rights reserved.
+ *
+ * @author     Manoel Serafim
+ * @email      manoel.serafim@proton.me
+ * @github     https://github.com/manoel-serafim
+ * SPDX-License-Identifier: GPL-3.0
+ */
+
 use std::collections::HashSet;
 use crate::constants::BYTE_RANGE;
 
@@ -51,12 +67,6 @@ pub fn serial_correlation(window: &[u8]) -> f64 {
         sum_x_sq += x * x;
         sum_xy   += x * y;
     }
-    // Pearson lag-1 circular autocorrelation:
-    //   r = (n·Σxy − Σx·Σy) / sqrt((n·Σx²−(Σx)²)·(n·Σy²−(Σy)²))
-    // Because the series wraps around circularly, Σy == Σx and Σy² == Σx²,
-    // so both variance legs are equal to `denominator` and the sqrt collapses:
-    //   r = numerator / denominator
-    // A clamp guards against tiny floating-point overshoots.
     let numerator   = n * sum_xy   - sum_x * sum_x;
     let denominator = n * sum_x_sq - sum_x * sum_x;
     if denominator.abs() < f64::EPSILON {

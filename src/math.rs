@@ -1,3 +1,19 @@
+/**
+ * @file      math.rs
+ * @brief     Statistical distribution approximations and hypothesis tests.
+ * @details   Implements a polynomial erfc approximation, chi-squared p-value
+ *            via the Wilson-Hilferty cube-root transform, the Kolmogorov-Smirnov
+ *            uniform-distribution test, and the Wald-Wolfowitz runs test.
+ *
+ * @copyright  (C) Core Labs
+ *             All rights reserved.
+ *
+ * @author     Manoel Serafim
+ * @email      manoel.serafim@proton.me
+ * @github     https://github.com/manoel-serafim
+ * SPDX-License-Identifier: GPL-3.0
+ */
+
 use crate::constants::BYTE_RANGE;
 
 pub fn erfc_approx(x: f64) -> f64 {
@@ -18,8 +34,8 @@ pub fn chi2_pvalue(chi2_stat: f64, degrees_of_freedom: usize) -> f64 {
     if chi2_stat <= 0.0 || degrees_of_freedom == 0 {
         return 1.0;
     }
-    let df_f64   = degrees_of_freedom as f64;
-    let cbrt_arg = (chi2_stat / df_f64).powf(1.0 / 3.0);
+    let df_f64       = degrees_of_freedom as f64;
+    let cbrt_arg     = (chi2_stat / df_f64).powf(1.0 / 3.0);
     let normal_mu    = 1.0 - 2.0 / (9.0 * df_f64);
     let normal_sigma = (2.0 / (9.0 * df_f64)).sqrt();
     normal_upper_tail((cbrt_arg - normal_mu) / normal_sigma)
@@ -78,7 +94,7 @@ pub fn runs_test(data: &[u8]) -> (f64, f64) {
         }
     }
 
-    let runs_f64   = run_count as f64;
+    let runs_f64      = run_count as f64;
     let expected_runs = 2.0 * count_above * count_below / total_n + 1.0;
     let runs_variance = 2.0 * count_above * count_below
         * (2.0 * count_above * count_below - total_n)

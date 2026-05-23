@@ -1,3 +1,20 @@
+/**
+ * @file      ui/regions.rs
+ * @brief     Anomalous-region table panel.
+ * @details   Renders a filterable grid of flagged byte-range windows showing
+ *            their offset, entropy, chi-squared statistic and p-value, serial
+ *            correlation, and Hamming weight, with click-to-jump navigation
+ *            into the hex dump panel.
+ *
+ * @copyright  (C) Core Labs
+ *             All rights reserved.
+ *
+ * @author     Manoel Serafim
+ * @email      manoel.serafim@proton.me
+ * @github     https://github.com/manoel-serafim
+ * SPDX-License-Identifier: GPL-3.0
+ */
+
 use eframe::egui;
 use egui::{RichText, Rounding, Stroke, Vec2};
 
@@ -26,7 +43,7 @@ pub fn render_suspicious_regions(
             ui.label(RichText::new(display_name).size(11.0).color(pal::MUTED).italics());
             ui.add_space(6.0);
 
-            let flagged_count    = flagged_regions.len();
+            let flagged_count        = flagged_regions.len();
             let (badge_fg, badge_bg) = if flagged_count > 0 {
                 (pal::RED, pal::RED_LIGHT)
             } else {
@@ -95,18 +112,18 @@ pub fn render_suspicious_regions(
                             RichText::new(format!("{:.4}", region.entropy)).monospace().size(12.0),
                         ).sense(egui::Sense::click()),
                     );
-                    let resp_chi2    = ui.add(
+                    let resp_chi2 = ui.add(
                         egui::Label::new(
                             RichText::new(format!("{:.2}", region.chi2)).monospace().size(12.0),
                         ).sense(egui::Sense::click()),
                     );
-                    let resp_chi2p   = ui.add(
+                    let resp_chi2p = ui.add(
                         egui::Label::new(
                             RichText::new(format!("{:.4}", region.chi2_pvalue))
                                 .monospace().size(12.0).color(chi2p_color),
                         ).sense(egui::Sense::click()),
                     );
-                    let resp_serial  = ui.add(
+                    let resp_serial = ui.add(
                         egui::Label::new(
                             RichText::new(format!("{:.4}", region.serial_corr)).monospace().size(12.0),
                         ).sense(egui::Sense::click()),

@@ -1,3 +1,18 @@
+/**
+ * @file      main.rs
+ * @brief     Application entry point.
+ * @details   Configures the eframe native window and launches the ELICIUNT
+ *            binary-analysis GUI.
+ *
+ * @copyright  (C) Core Labs
+ *             All rights reserved.
+ *
+ * @author     Manoel Serafim
+ * @email      manoel.serafim@proton.me
+ * @github     https://github.com/manoel-serafim
+ * SPDX-License-Identifier: GPL-3.0
+ */
+
 mod analysis;
 mod app;
 mod constants;

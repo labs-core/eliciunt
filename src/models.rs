@@ -1,3 +1,19 @@
+/**
+ * @file      models.rs
+ * @brief     Core data structures for analysis results and UI state.
+ * @details   Defines the metric statistics aggregates, per-file analysis
+ *            results, anomaly threshold models, hex-view bookmark and
+ *            drag-selection state, and the top-level BinaryFile container.
+ *
+ * @copyright  (C) Core Labs
+ *             All rights reserved.
+ *
+ * @author     Manoel Serafim
+ * @email      manoel.serafim@proton.me
+ * @github     https://github.com/manoel-serafim
+ * SPDX-License-Identifier: GPL-3.0
+ */
+
 use crate::constants::BYTE_RANGE;
 
 #[derive(Clone, Default)]
@@ -25,16 +41,16 @@ impl MetricStats {
 
 #[derive(Clone, Default)]
 pub struct FileStatistics {
-    pub entropy_stats:    MetricStats,
-    pub chi2_stats:       MetricStats,
-    pub serial_stats:     MetricStats,
-    pub hamming_stats:    MetricStats,
-    pub ks_statistic:     f64,
-    pub ks_pvalue:        f64,
-    pub global_chi2:      f64,
-    pub global_chi2_p:    f64,
-    pub runs_z_score:     f64,
-    pub runs_pvalue:      f64,
+    pub entropy_stats:     MetricStats,
+    pub chi2_stats:        MetricStats,
+    pub serial_stats:      MetricStats,
+    pub hamming_stats:     MetricStats,
+    pub ks_statistic:      f64,
+    pub ks_pvalue:         f64,
+    pub global_chi2:       f64,
+    pub global_chi2_p:     f64,
+    pub runs_z_score:      f64,
+    pub runs_pvalue:       f64,
     pub mean_window_chi2p: f64,
 }
 
@@ -91,18 +107,18 @@ pub struct RegionInsight {
 
 #[derive(Clone)]
 pub struct AnalysisResult {
-    pub entropy:          Vec<[f64; 2]>,
-    pub chi2:             Vec<[f64; 2]>,
-    pub serial_corr:      Vec<[f64; 2]>,
-    pub hamming:          Vec<[f64; 2]>,
+    pub entropy:           Vec<[f64; 2]>,
+    pub chi2:              Vec<[f64; 2]>,
+    pub serial_corr:       Vec<[f64; 2]>,
+    pub hamming:           Vec<[f64; 2]>,
     pub byte_distribution: [f64; BYTE_RANGE],
-    pub byte_counts:      [usize; BYTE_RANGE],
-    pub bigram_scores:    Vec<[f64; 2]>,
-    pub trigram_scores:   Vec<[f64; 2]>,
-    pub regions:          Vec<RegionInsight>,
-    pub thresholds:       AnomalyThresholds,
-    pub window_size:      usize,
-    pub stats:            FileStatistics,
+    pub byte_counts:       [usize; BYTE_RANGE],
+    pub bigram_scores:     Vec<[f64; 2]>,
+    pub trigram_scores:    Vec<[f64; 2]>,
+    pub regions:           Vec<RegionInsight>,
+    pub thresholds:        AnomalyThresholds,
+    pub window_size:       usize,
+    pub stats:             FileStatistics,
 }
 
 impl Default for AnalysisResult {
@@ -130,53 +146,33 @@ pub struct BinaryFile {
     pub result: Option<AnalysisResult>,
 }
 
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Paste these two structs anywhere inside models.rs (e.g. after BinaryFile).
-// ─────────────────────────────────────────────────────────────────────────────
-
 use eframe::egui::Color32;
 
-/// A named, coloured byte-range bookmark created by the user in the hex view.
-/// It is stored globally on `App` and fed into every metric plot as a shaded
-/// background band so the region is always visible across all graphs.
 #[derive(Clone)]
 pub struct HexBookmark {
-    /// Byte offset where the selection starts.
-    pub start:  usize,
-    /// Length of the selection in bytes.
-    pub len:    usize,
-    /// Display label chosen by the user.
-    pub label:  String,
-    /// Colour chosen by the user (same colour used in hex rows AND plot bands).
-    pub color:  Color32,
+    pub start: usize,
+    pub len:   usize,
+    pub label: String,
+    pub color: Color32,
 }
 
 impl HexBookmark {
-    /// Inclusive end offset (last byte of the bookmarked region).
     pub fn end(&self) -> usize {
         self.start.saturating_add(self.len).saturating_sub(1)
     }
 
-    /// The x-axis extent as plot coordinates (byte offsets).
     pub fn plot_x_range(&self) -> (f64, f64) {
         (self.start as f64, (self.start + self.len) as f64)
     }
 }
 
-/// Tracks the in-progress drag selection in the hex panel.
-/// Cleared as soon as the user confirms the bookmark via the creation dialog.
 #[derive(Clone, Default)]
 pub struct HexSelectionState {
-    /// Byte index where the mouse button was pressed.
     pub drag_start: Option<usize>,
-    /// Byte index currently under the cursor (updated every frame while dragging).
     pub drag_end:   Option<usize>,
 }
 
 impl HexSelectionState {
-    /// Returns `(start, len)` normalised so start ≤ end, or `None` while no
-    /// drag is in progress.
     pub fn normalised(&self) -> Option<(usize, usize)> {
         match (self.drag_start, self.drag_end) {
             (Some(a), Some(b)) => {
