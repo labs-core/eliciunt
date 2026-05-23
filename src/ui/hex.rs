@@ -1,7 +1,8 @@
 use eframe::egui;
-use egui::{RichText, Rounding, Stroke, Vec2};
+use egui::{Color32, PointerButton, Rect, Rounding, Sense, Stroke, Vec2};
 
 use crate::constants::HEX_COLUMNS;
+use crate::models::{HexBookmark, HexSelectionState};
 use crate::palette as pal;
 
 pub fn render_hex_view(
@@ -9,99 +10,188 @@ pub fn render_hex_view(
     file_data:      &[u8],
     scroll_to_byte: Option<usize>,
     highlight:      Option<(usize, usize)>,
-) {
-    let total_lines = (file_data.len() + HEX_COLUMNS - 1) / HEX_COLUMNS;
+    bookmarks:      &[HexBookmark],
+    selection:      &mut HexSelectionState,
+    dialog_open:    bool,
+) -> Option<(usize, usize)> {
+    let mut finished_selection: Option<(usize, usize)> = None;
 
-    // show_rows expects the height of one row WITHOUT item_spacing (it adds
-    // spacing internally, computing row_height_with_spacing = sans + spacing.y).
-    // We must use the WITH-spacing value for the pixel offset so both match.
+    let total_lines              = (file_data.len() + HEX_COLUMNS - 1) / HEX_COLUMNS;
     let text_height_sans_spacing = ui.text_style_height(&egui::TextStyle::Monospace);
     let spacing_y                = ui.spacing().item_spacing.y;
-    let row_height_with_spacing  = text_height_sans_spacing + spacing_y;
+    let row_height               = text_height_sans_spacing + spacing_y;
 
-    let target_offset_y: Option<f32> = scroll_to_byte.map(|byte_offset| {
-        let target_line = byte_offset / HEX_COLUMNS;
-        // Subtract 3 lines so the target lands a few rows from the top.
-        (target_line.saturating_sub(3)) as f32 * row_height_with_spacing
+    let target_offset_y: Option<f32> = scroll_to_byte.map(|b| {
+        let line = b / HEX_COLUMNS;
+        (line.saturating_sub(3)) as f32 * row_height
     });
 
-    let highlighted_line_range: Option<std::ops::RangeInclusive<usize>> =
-        highlight.map(|(start_byte, byte_len)| {
-            let first_line = start_byte / HEX_COLUMNS;
-            let last_line  = start_byte.saturating_add(byte_len).saturating_sub(1) / HEX_COLUMNS;
-            first_line..=last_line
+    let hl_range: Option<std::ops::RangeInclusive<usize>> = highlight.map(|(s, l)| {
+        (s / HEX_COLUMNS)..=((s + l).saturating_sub(1) / HEX_COLUMNS)
+    });
+    let drag_range: Option<std::ops::RangeInclusive<usize>> =
+        selection.normalised().map(|(s, l)| {
+            (s / HEX_COLUMNS)..=((s + l).saturating_sub(1) / HEX_COLUMNS)
         });
 
-    // Build the scroll area.  vertical_scroll_offset is applied by egui INSIDE
-    // show_viewport_dyn, after loading persisted state but before clamping to
-    // content bounds — so it always overrides any previous user scroll position.
+    // Disable the scroll area's own drag-to-scroll while we own the pointer
+    // for a selection, so the two gestures don't fight each other.
+    let is_selecting = selection.drag_start.is_some();
+
     let mut scroll_area = egui::ScrollArea::vertical()
         .id_source("hex_scroll")
-        .auto_shrink([false, false]);
+        .auto_shrink([false, false])
+        .drag_to_scroll(!is_selecting)
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 
     if let Some(offset_y) = target_offset_y {
         scroll_area = scroll_area.vertical_scroll_offset(offset_y);
     }
 
-    // Pass text_height_sans_spacing so show_rows' internal arithmetic
-    // (row_height_with_spacing = sans + spacing.y) is correct.
-    scroll_area.show_rows(ui, text_height_sans_spacing, total_lines, |ui, visible_line_range| {
-        for line_idx in visible_line_range {
-            let byte_start = line_idx * HEX_COLUMNS;
-            let byte_end   = (byte_start + HEX_COLUMNS).min(file_data.len());
-            let line_bytes = &file_data[byte_start..byte_end];
+    let mut row_zero_abs_y: f32 = 0.0;
 
-            let mut hex_segment   = format!("{:08X}  ", byte_start);
-            let mut ascii_segment = String::with_capacity(HEX_COLUMNS);
+    let output = scroll_area.show_rows(
+        ui,
+        text_height_sans_spacing,
+        total_lines,
+        |ui, visible_line_range| {
+            row_zero_abs_y = ui.cursor().min.y
+                - visible_line_range.start as f32 * row_height;
 
-            for (col_idx, byte_val) in line_bytes.iter().enumerate() {
-                if col_idx == 8 { hex_segment.push(' '); }
-                hex_segment.push_str(&format!("{:02X} ", byte_val));
-                ascii_segment.push(
-                    if byte_val.is_ascii_graphic() || *byte_val == b' ' {
-                        *byte_val as char
-                    } else {
-                        '·'
-                    },
-                );
+            for line_idx in visible_line_range {
+                let byte_start = line_idx * HEX_COLUMNS;
+                let byte_end   = (byte_start + HEX_COLUMNS).min(file_data.len());
+                let line_bytes = &file_data[byte_start..byte_end];
+
+                // ── hex text ──────────────────────────────────────────────
+                let mut hex = format!("{:08X}  ", byte_start);
+                let mut asc = String::with_capacity(HEX_COLUMNS);
+                for (i, b) in line_bytes.iter().enumerate() {
+                    if i == 8 { hex.push(' '); }
+                    hex.push_str(&format!("{:02X} ", b));
+                    asc.push(if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '·' });
+                }
+                let missing = HEX_COLUMNS - line_bytes.len();
+                for p in 0..missing {
+                    if line_bytes.len() + p == 8 { hex.push(' '); }
+                    hex.push_str("   ");
+                }
+                hex.push_str(&format!(" │ {}", asc));
+
+                const ROW_W: f32 = 720.0;
+                let (row_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(ROW_W, text_height_sans_spacing), Sense::hover());
+
+                let is_hl  = hl_range.as_ref().map_or(false, |r| r.contains(&line_idx));
+                let is_sel = drag_range.as_ref().map_or(false, |r| r.contains(&line_idx));
+                let bm     = bookmarks.iter().find(|bm| {
+                    line_idx >= bm.start / HEX_COLUMNS && line_idx <= bm.end() / HEX_COLUMNS
+                });
+
+                let p = ui.painter();
+
+                if let Some(bm) = bm {
+                    let fill   = Color32::from_rgba_unmultiplied(bm.color.r(), bm.color.g(), bm.color.b(), 40);
+                    let border = Color32::from_rgba_unmultiplied(bm.color.r(), bm.color.g(), bm.color.b(), 130);
+                    p.rect(row_rect.expand2(Vec2::new(2.0, 0.5)), Rounding::same(2.0), fill, Stroke::new(1.0, border));
+
+                    if line_idx == bm.start / HEX_COLUMNS && !bm.label.is_empty() {
+                        let galley = ui.fonts(|f| {
+                            f.layout_no_wrap(bm.label.clone(), egui::FontId::proportional(9.5), bm.color)
+                        });
+                        let pill = Rect::from_min_size(
+                            row_rect.right_top() + Vec2::new(-galley.size().x - 8.0, 1.0),
+                            galley.size() + Vec2::new(6.0, 2.0),
+                        );
+                        p.rect(pill, Rounding::same(3.0),
+                            Color32::from_rgba_unmultiplied(bm.color.r(), bm.color.g(), bm.color.b(), 30),
+                            Stroke::new(1.0, bm.color));
+                        p.galley(pill.min + Vec2::new(3.0, 1.0), galley, bm.color);
+                    }
+                }
+
+                if is_sel {
+                    p.rect(row_rect.expand(1.0), Rounding::same(2.0),
+                        Color32::from_rgba_unmultiplied(80, 140, 220, 55),
+                        Stroke::new(1.0, Color32::from_rgb(80, 140, 220)));
+                }
+                if is_hl {
+                    p.rect(row_rect.expand(1.0), Rounding::same(2.0),
+                        pal::HL_BG, Stroke::new(1.0, pal::HL_BORDER));
+                }
+
+                let text_color = if is_hl {
+                    pal::HL_BORDER
+                } else if is_sel {
+                    Color32::from_rgb(180, 210, 255)
+                } else if let Some(bm) = bm {
+                    Color32::from_rgba_unmultiplied(
+                        bm.color.r().saturating_add(20),
+                        bm.color.g().saturating_add(20),
+                        bm.color.b().saturating_add(20),
+                        255,
+                    )
+                } else {
+                    pal::TEXT
+                };
+
+                p.text(row_rect.left_center(), egui::Align2::LEFT_CENTER,
+                    &hex, egui::FontId::monospace(12.0), text_color);
+            }
+        },
+    );
+
+    // ── Raw-pointer drag tracking ─────────────────────────────────────────
+    //
+    // We read pointer state directly from ui.input() so a single gesture
+    // spans as many rows as needed.  We guard against the dialog being open
+    // so that clicking a colour swatch doesn't start a new selection.
+    let inner_rect = output.inner_rect;
+
+    if !dialog_open {
+        ui.input(|input| {
+            let pointer = &input.pointer;
+
+            let y_to_line = |pos: egui::Pos2| -> usize {
+                let rel_y = pos.y - row_zero_abs_y;
+                ((rel_y / row_height).floor() as usize).min(total_lines.saturating_sub(1))
+            };
+
+            let just_pressed  = pointer.button_pressed(PointerButton::Primary);
+            let held          = pointer.button_down(PointerButton::Primary);
+            let just_released = pointer.button_released(PointerButton::Primary);
+
+            // Start selection only when the click lands inside the hex panel.
+            if just_pressed {
+                if let Some(pos) = pointer.interact_pos() {
+                    if inner_rect.contains(pos) {
+                        let start = y_to_line(pos) * HEX_COLUMNS;
+                        selection.drag_start = Some(start);
+                        selection.drag_end   = Some(start);
+                    }
+                }
             }
 
-            let missing_cols = HEX_COLUMNS - line_bytes.len();
-            for pad_col in 0..missing_cols {
-                if line_bytes.len() + pad_col == 8 { hex_segment.push(' '); }
-                hex_segment.push_str("   ");
+            // Update end every frame while button is held, even outside panel.
+            if held && selection.drag_start.is_some() {
+                if let Some(pos) = pointer.hover_pos() {
+                    let line     = y_to_line(pos);
+                    let byte_end = ((line + 1) * HEX_COLUMNS)
+                        .min(file_data.len())
+                        .saturating_sub(1);
+                    selection.drag_end = Some(byte_end);
+                }
             }
-            hex_segment.push_str(&format!(" │ {}", ascii_segment));
 
-            const HEX_ROW_RENDER_WIDTH: f32 = 720.0;
-            let is_highlighted = highlighted_line_range
-                .as_ref()
-                .map_or(false, |range| range.contains(&line_idx));
-
-            if is_highlighted {
-                let desired_size  = Vec2::new(HEX_ROW_RENDER_WIDTH, text_height_sans_spacing);
-                let (row_rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-                ui.painter().rect(
-                    row_rect.expand(1.0),
-                    Rounding::same(2.0),
-                    pal::HL_BG,
-                    Stroke::new(1.0, pal::HL_BORDER),
-                );
-                ui.painter().text(
-                    row_rect.left_center(),
-                    egui::Align2::LEFT_CENTER,
-                    &hex_segment,
-                    egui::FontId::monospace(12.0),
-                    pal::HL_BORDER,
-                );
-            } else {
-                ui.label(
-                    RichText::new(&hex_segment)
-                        .monospace()
-                        .size(12.0)
-                        .color(pal::TEXT),
-                );
+            // Finalise on release.
+            if just_released && selection.drag_start.is_some() {
+                if let Some(norm) = selection.normalised() {
+                    finished_selection = Some(norm);
+                }
+                // Keep drag_start set so blue band persists until dialog clears it.
             }
-        }
-    });
+        });
+    }
+
+    finished_selection
 }

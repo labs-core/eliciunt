@@ -129,3 +129,67 @@ pub struct BinaryFile {
     pub data:   Vec<u8>,
     pub result: Option<AnalysisResult>,
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Paste these two structs anywhere inside models.rs (e.g. after BinaryFile).
+// ─────────────────────────────────────────────────────────────────────────────
+
+use eframe::egui::Color32;
+
+/// A named, coloured byte-range bookmark created by the user in the hex view.
+/// It is stored globally on `App` and fed into every metric plot as a shaded
+/// background band so the region is always visible across all graphs.
+#[derive(Clone)]
+pub struct HexBookmark {
+    /// Byte offset where the selection starts.
+    pub start:  usize,
+    /// Length of the selection in bytes.
+    pub len:    usize,
+    /// Display label chosen by the user.
+    pub label:  String,
+    /// Colour chosen by the user (same colour used in hex rows AND plot bands).
+    pub color:  Color32,
+}
+
+impl HexBookmark {
+    /// Inclusive end offset (last byte of the bookmarked region).
+    pub fn end(&self) -> usize {
+        self.start.saturating_add(self.len).saturating_sub(1)
+    }
+
+    /// The x-axis extent as plot coordinates (byte offsets).
+    pub fn plot_x_range(&self) -> (f64, f64) {
+        (self.start as f64, (self.start + self.len) as f64)
+    }
+}
+
+/// Tracks the in-progress drag selection in the hex panel.
+/// Cleared as soon as the user confirms the bookmark via the creation dialog.
+#[derive(Clone, Default)]
+pub struct HexSelectionState {
+    /// Byte index where the mouse button was pressed.
+    pub drag_start: Option<usize>,
+    /// Byte index currently under the cursor (updated every frame while dragging).
+    pub drag_end:   Option<usize>,
+}
+
+impl HexSelectionState {
+    /// Returns `(start, len)` normalised so start ≤ end, or `None` while no
+    /// drag is in progress.
+    pub fn normalised(&self) -> Option<(usize, usize)> {
+        match (self.drag_start, self.drag_end) {
+            (Some(a), Some(b)) => {
+                let lo = a.min(b);
+                let hi = a.max(b);
+                Some((lo, hi - lo + 1))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.drag_start = None;
+        self.drag_end   = None;
+    }
+}

@@ -1,12 +1,16 @@
 use eframe::egui;
-use egui::{Color32, RichText, Stroke, Vec2};
-use egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoints};
+use egui::{Color32, Frame, Margin, RichText, Rounding, Stroke, Vec2};
+use egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoints, VLine};
 
 use crate::constants::{BYTE_RANGE, PLOT_HEIGHT_PX, UNIFORM_SPIKE_RATIO};
 use crate::export::{export_bar_chart_png, export_line_chart_png, save_png_via_dialog};
-use crate::models::AnalysisResult;
+use crate::models::{AnalysisResult, HexBookmark};
 use crate::palette as pal;
 use crate::ui::widgets::{card_frame, png_export_button, truncate_filename};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// render_metric_plot
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub fn render_metric_plot(
     ui:            &mut egui::Ui,
@@ -16,6 +20,7 @@ pub fn render_metric_plot(
     anomaly_band:  Option<(f64, f64, f64)>,
     file_index:    usize,
     plot_id:       usize,
+    bookmarks:     &[HexBookmark],           // ← NEW
 ) -> Option<usize> {
     let (y_bound_lo, y_bound_hi) = if series.is_empty() {
         (0.0, 1.0)
@@ -26,6 +31,15 @@ pub fn render_metric_plot(
         let hi = anomaly_band.map(|(m, s, k)| hi.max(m + k * s)).unwrap_or(hi);
         (lo, hi)
     };
+
+    // Snapshot bookmarks for the closure (egui requires 'static or move).
+    let bm_snapshot: Vec<(f64, f64, Color32, String)> = bookmarks
+        .iter()
+        .map(|bm| {
+            let (x0, x1) = bm.plot_x_range();
+            (x0, x1, bm.color, bm.label.clone())
+        })
+        .collect();
 
     let plot_response = Plot::new(format!("metric_{file_index}_{plot_id}"))
         .height(PLOT_HEIGHT_PX)
@@ -41,12 +55,72 @@ pub fn render_metric_plot(
             format!("offset: 0x{:X}\n{}: {:.4}", point.x as usize, label, point.y)
         })
         .show(ui, |plot_ui| {
+            // ── bookmark background bands ─────────────────────────────────
+            // egui_plot doesn't have a native filled-rect primitive, so we
+            // approximate a band with a pair of VLines plus a transparent
+            // polygon drawn via the custom painting callback trick: we store
+            // the screen transform and paint afterwards.  The simplest approach
+            // that works with egui_plot 0.27-style API is to draw two
+            // VLines with a thick alpha-blended stroke.  For a true filled
+            // rect we need to use `plot_ui.ctx()` + `painter` after the show
+            // closure; the approach below uses semi-transparent vertical lines
+            // spaced 1 px apart in plot-space to fill the band.
+            //
+            // For a pixel-perfect fill we instead take the approach of drawing
+            // an opaque `Polygon` using `plot_ui.polygon()` which is stable in
+            // egui_plot >= 0.26.
+
+            for (x0, x1, color, label) in &bm_snapshot {
+                // Filled polygon spanning the full y-axis visible range.
+                // We use a very tall rect so it always covers the plot area
+                // regardless of zoom.
+                let fill_color = Color32::from_rgba_unmultiplied(
+                    color.r(), color.g(), color.b(), 35,
+                );
+                let border_color = Color32::from_rgba_unmultiplied(
+                    color.r(), color.g(), color.b(), 160,
+                );
+
+                // Four corners at an extreme y range.
+                let y_lo = -1e15_f64;
+                let y_hi =  1e15_f64;
+                let polygon = egui_plot::Polygon::new(PlotPoints::from(vec![
+                    [*x0, y_lo],
+                    [*x1, y_lo],
+                    [*x1, y_hi],
+                    [*x0, y_hi],
+                ]))
+                .fill_color(fill_color)
+                .stroke(Stroke::new(0.0, Color32::TRANSPARENT))
+                .name(label.as_str());
+                plot_ui.polygon(polygon);
+
+                // Left and right border VLines.
+                plot_ui.vline(
+                    VLine::new(*x0)
+                        .color(border_color)
+                        .width(1.2)
+                        .style(egui_plot::LineStyle::Dashed { length: 6.0 })
+                        .name(label.as_str()),
+                );
+                plot_ui.vline(
+                    VLine::new(*x1)
+                        .color(border_color)
+                        .width(1.2)
+                        .style(egui_plot::LineStyle::Dashed { length: 6.0 })
+                        .name(""),
+                );
+            }
+
+            // ── main metric line ──────────────────────────────────────────
             plot_ui.line(
                 Line::new(PlotPoints::from(series.to_vec()))
                     .color(pal::RED)
                     .width(1.5)
                     .name(metric_name),
             );
+
+            // ── anomaly band ──────────────────────────────────────────────
             if let Some((band_mean, band_sd, band_k)) = anomaly_band {
                 plot_ui.hline(
                     HLine::new(band_mean)
@@ -82,13 +156,18 @@ pub fn render_metric_plot(
     None
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// render_metric_row
+// ─────────────────────────────────────────────────────────────────────────────
+
 pub fn render_metric_row(
-    ui:          &mut egui::Ui,
-    metric_name: &str,
-    metric_unit: &str,
+    ui:             &mut egui::Ui,
+    metric_name:    &str,
+    metric_unit:    &str,
     column_entries: &[(&[[f64; 2]], Option<(f64, f64, f64)>, usize, &str)],
-    column_width: f32,
-    row_id:      usize,
+    column_width:   f32,
+    row_id:         usize,
+    bookmarks:      &[HexBookmark],           // ← NEW
 ) -> Option<(usize, usize)> {
     let mut clicked_file_offset: Option<(usize, usize)> = None;
 
@@ -103,6 +182,35 @@ pub fn render_metric_row(
                 RichText::new("right-click → jump to hex")
                     .size(10.0).color(pal::MUTED).italics(),
             );
+
+            // ── bookmark legend pills ─────────────────────────────────────
+            if !bookmarks.is_empty() {
+                ui.add_space(10.0);
+                ui.label(RichText::new("│").size(10.0).color(pal::BORDER));
+                ui.add_space(4.0);
+                for bm in bookmarks {
+                    let pill_color = bm.color;
+                    let (frame_fill, frame_stroke) = (
+                        Color32::from_rgba_unmultiplied(
+                            pill_color.r(), pill_color.g(), pill_color.b(), 30,
+                        ),
+                        Stroke::new(1.0, pill_color),
+                    );
+                    egui::Frame::none()
+                        .fill(frame_fill)
+                        .stroke(frame_stroke)
+                        .rounding(Rounding::same(3.0))
+                        .inner_margin(Margin::symmetric(4.0, 1.0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(&bm.label)
+                                    .size(9.5)
+                                    .color(pill_color),
+                            );
+                        });
+                    ui.add_space(2.0);
+                }
+            }
         });
         ui.add_space(4.0);
 
@@ -139,6 +247,7 @@ pub fn render_metric_row(
                             *anomaly_band,
                             *file_idx,
                             row_id * 64 + col_idx,
+                            bookmarks,       // ← forwarded
                         ) {
                             clicked_file_offset = Some((*file_idx, byte_offset));
                         }
@@ -177,6 +286,10 @@ pub fn render_metric_row(
     });
     clicked_file_offset
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// render_byte_distribution  (unchanged, kept here for completeness)
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub fn render_byte_distribution(
     ui:         &mut egui::Ui,
