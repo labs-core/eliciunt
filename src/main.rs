@@ -1,10 +1,10 @@
 use eframe::egui;
-use egui::{Color32, FontId, Frame, Margin, RichText, Rounding, Stroke, Vec2};
-use egui_plot::{Bar, BarChart, HLine, Legend, Line, Plot, PlotPoints};
+use egui::{Color32, Frame, Margin, RichText, Rounding, Stroke, Vec2};
+use egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoints};
 use rfd::FileDialog;
 use std::{collections::HashSet, fs};
 
-const MAX_BYTE: usize = 256;
+const MAX_BYTE:  usize = 256;
 const HEX_WIDTH: usize = 16;
 
 mod pal {
@@ -23,9 +23,6 @@ mod pal {
     pub const GREEN:     Color32 = Color32::from_rgb( 22, 120,  60);
 }
 
-// ── Statistical helpers ───────────────────────────────────────────────────────
-
-/// Abramowitz & Stegun erfc approximation, max error ≈ 1.5×10⁻⁷.
 fn erfc_approx(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.3275911 * x.abs());
     let p = t * (0.254829592
@@ -36,13 +33,10 @@ fn erfc_approx(x: f64) -> f64 {
     if x >= 0.0 { r } else { 2.0 - r }
 }
 
-/// P(Z > z) for the standard normal distribution.
 fn normal_upper(z: f64) -> f64 {
     0.5 * erfc_approx(z / std::f64::consts::SQRT_2)
 }
 
-/// Chi² p-value (upper tail, `df` degrees of freedom) via Wilson–Hilferty
-/// normal approximation.  Returns P(χ²_{df} > x).
 fn chi2_pvalue(x: f64, df: usize) -> f64 {
     if x <= 0.0 || df == 0 { return 1.0; }
     let d    = df as f64;
@@ -52,8 +46,6 @@ fn chi2_pvalue(x: f64, df: usize) -> f64 {
     normal_upper((cbrt - mu) / sig)
 }
 
-/// Kolmogorov–Smirnov test of the byte-value empirical CDF against
-/// Uniform{0, …, 255}.  Returns (D statistic, asymptotic p-value).
 fn ks_uniform_test(data: &[u8]) -> (f64, f64) {
     if data.is_empty() { return (0.0, 1.0); }
     let n = data.len();
@@ -76,8 +68,6 @@ fn ks_uniform_test(data: &[u8]) -> (f64, f64) {
     (d, (2.0 * p_sum).clamp(0.0, 1.0))
 }
 
-/// Wald–Wolfowitz runs test (above / below median).
-/// Returns (Z statistic, two-tailed p-value).
 fn runs_test(data: &[u8]) -> (f64, f64) {
     if data.len() < 2 { return (0.0, 1.0); }
     let median = {
@@ -101,8 +91,6 @@ fn runs_test(data: &[u8]) -> (f64, f64) {
     let z = (r - mu) / var.sqrt();
     (z, (2.0 * normal_upper(z.abs())).min(1.0))
 }
-
-// ── Aggregate metric statistics ───────────────────────────────────────────────
 
 #[derive(Clone, Default)]
 struct MetricStats {
@@ -131,272 +119,164 @@ struct FileStatistics {
     chi2_stats:    MetricStats,
     serial_stats:  MetricStats,
     hamming_stats: MetricStats,
-    /// Kolmogorov–Smirnov statistic vs Uniform[0,255].
     ks_d:          f64,
     ks_p:          f64,
-    /// Global chi-square over the whole file (df = 255).
     global_chi2:   f64,
     global_chi2_p: f64,
-    /// Wald–Wolfowitz runs test.
     runs_z:        f64,
     runs_p:        f64,
-    /// Mean chi-square p-value across windows (higher → more uniform).
     mean_window_p: f64,
 }
 
-// ── SVG export ────────────────────────────────────────────────────────────────
+use plotters::prelude::*;
 
-/// Generate a black-and-white scientific line chart as an SVG string.
-/// `refs`: optional horizontal reference lines `(y_value, label)`.
-fn svg_line_chart(
-    data:    &[[f64; 2]],
-    title:   &str,
-    x_label: &str,
-    y_label: &str,
-    refs:    &[(f64, &str)],
-) -> String {
-    const VW: f64 = 900.0;
-    const VH: f64 = 440.0;
-    const ML: f64 = 82.0;
-    const MR: f64 = 36.0;
-    const MT: f64 = 54.0;
-    const MB: f64 = 60.0;
-    let pw = VW - ML - MR;
-    let ph = VH - MT - MB;
+fn png_line_chart(
+    data:          &[[f64; 2]],
+    title:         &str,
+    x_label:       &str,
+    y_label:       &str,
+    anomaly_bands: Option<(f64, f64, f64)>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut buf = vec![0u8; 900 * 400 * 3];
+    {
+        let root = BitMapBackend::with_buffer(&mut buf, (900, 400)).into_drawing_area();
+        root.fill(&WHITE)?;
 
-    if data.is_empty() {
-        return format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {VW} {VH}">
-                <rect width="{VW}" height="{VH}" fill="white"/>
-                <text x="{cx}" y="{cy}" text-anchor="middle"
-                    font-family='Georgia, serif'
-                    font-size="14" fill='#555'>
-                    No data
-                </text>
-            </svg>"#,
-            cx = VW / 2.0, cy = VH / 2.0
-        );
+        if data.is_empty() {
+            root.present()?;
+            drop(root);
+            return png_from_rgb(&buf, 900, 400);
+        }
 
+        let x_min = data.iter().map(|p| p[0]).fold(f64::INFINITY,     f64::min);
+        let x_max = data.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+        let y_min = data.iter().map(|p| p[1]).fold(f64::INFINITY,     f64::min);
+        let y_max = data.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
+
+        let (y_lo, y_hi) = if let Some((mean, sd, k)) = anomaly_bands {
+            let lo  = y_min.min(mean - k * sd);
+            let hi  = y_max.max(mean + k * sd);
+            let pad = (hi - lo).max(1e-9) * 0.08;
+            (lo - pad, hi + pad)
+        } else {
+            let pad = (y_max - y_min).max(1e-9) * 0.08;
+            (y_min - pad, y_max + pad)
+        };
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption(title, ("sans-serif", 14).into_font())
+            .margin(10)
+            .x_label_area_size(44)
+            .y_label_area_size(72)
+            .build_cartesian_2d(x_min..x_max, y_lo..y_hi)?;
+
+        chart.configure_mesh()
+            .x_desc(x_label)
+            .y_desc(y_label)
+            .x_label_formatter(&|v| format!("0x{:X}", *v as usize))
+            .y_label_formatter(&|v| format!("{:.3}", v))
+            .draw()?;
+
+        chart.draw_series(LineSeries::new(
+            data.iter().map(|p| (p[0], p[1])),
+            &RGBColor(180, 30, 30),
+        ))?;
+
+        if let Some((mean, sd, k)) = anomaly_bands {
+            chart.draw_series(std::iter::once(PathElement::new(
+                vec![(x_min, mean), (x_max, mean)],
+                ShapeStyle::from(&BLACK).stroke_width(1),
+            )))?;
+            for val in [mean + k * sd, mean - k * sd] {
+                let seg = (x_max - x_min) / 120.0;
+                let mut on = true;
+                let mut x  = x_min;
+                while x < x_max {
+                    let x_end = (x + seg).min(x_max);
+                    if on {
+                        chart.draw_series(std::iter::once(PathElement::new(
+                            vec![(x, val), (x_end, val)],
+                            ShapeStyle::from(&RGBColor(100, 100, 100)).stroke_width(1),
+                        )))?;
+                    }
+                    x  = x_end;
+                    on = !on;
+                }
+            }
+        }
+
+        root.present()?;
     }
-
-    let x_min = data.iter().map(|p| p[0]).fold(f64::INFINITY,     f64::min);
-    let x_max = data.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
-    let y_min_d = data.iter().map(|p| p[1]).fold(f64::INFINITY,     f64::min);
-    let y_max_d = data.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
-
-    // Extend y-range to include reference lines.
-    let ref_min = refs.iter().map(|&(v, _)| v).fold(f64::INFINITY,     f64::min);
-    let ref_max = refs.iter().map(|&(v, _)| v).fold(f64::NEG_INFINITY, f64::max);
-    let y_min = y_min_d.min(ref_min);
-    let y_max = y_max_d.max(ref_max);
-
-    let x_rng = (x_max - x_min).max(f64::EPSILON);
-    let y_pad = (y_max - y_min).max(f64::EPSILON) * 0.08;
-    let y_lo  = y_min - y_pad;
-    let y_hi  = y_max + y_pad;
-    let y_rng = y_hi - y_lo;
-
-    let to_sx = |v: f64| ML + (v - x_min) / x_rng * pw;
-    let to_sy = |v: f64| MT + ph - (v - y_lo)  / y_rng * ph;
-
-    // Polyline.
-    let pts: String = data.iter()
-        .map(|p| format!("{:.2},{:.2}", to_sx(p[0]), to_sy(p[1])))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    // Grid + tick labels.
-    let mut grid = String::new();
-    let ny = 6usize;
-    for i in 0..=ny {
-        let frac = i as f64 / ny as f64;
-        let val  = y_lo + frac * y_rng;
-        let sy   = MT + ph * (1.0 - frac);
-        grid.push_str(&format!(
-            "  <line x1='{:.1}' y1='{:.1}' x2='{:.1}' y2='{:.1}' stroke='#e4e4e4' stroke-width='0.8'/>\n",
-            ML, sy, ML + pw, sy
-        ));
-        grid.push_str(&format!(
-            "  <text x='{:.1}' y='{:.1}' text-anchor='end' dominant-baseline='middle' font-family='Georgia,serif' font-size='11' fill='#333'>{:.4}</text>\n",
-            ML - 5.0, sy, val
-        ));
-    }
-    let nx = 6usize;
-    for i in 0..=nx {
-        let frac = i as f64 / nx as f64;
-        let val  = x_min + frac * x_rng;
-        let sx   = ML + frac * pw;
-        grid.push_str(&format!(
-            "  <line x1='{:.1}' y1='{:.1}' x2='{:.1}' y2='{:.1}' stroke='#e4e4e4' stroke-width='0.8'/>\n",
-            sx, MT, sx, MT + ph
-        ));
-        grid.push_str(&format!(
-            "  <text x='{:.1}' y='{:.1}' text-anchor='middle' dominant-baseline='hanging' font-family='Georgia,serif' font-size='11' fill='#333'>0x{:X}</text>\n",
-            sx, MT + ph + 6.0, val as usize
-        ));
-    }
-
-    // Horizontal reference lines (dashed).
-    let dash_styles = ["6,3", "3,3", "8,4"];
-    let mut ref_svg = String::new();
-    for (ri, &(val, lbl)) in refs.iter().enumerate() {
-        let sy  = to_sy(val);
-        let ds  = dash_styles.get(ri).unwrap_or(&"4,3");
-        ref_svg.push_str(&format!(
-            "  <line x1='{:.1}' y1='{:.1}' x2='{:.1}' y2='{:.1}' stroke='#666' stroke-width='1.0' stroke-dasharray='{}'/>\n",
-            ML, sy, ML + pw, sy, ds
-        ));
-        ref_svg.push_str(&format!(
-            "  <text x='{:.1}' y='{:.1}' font-family='Georgia,serif' font-size='10' fill='#555' dominant-baseline='middle'>{}</text>\n",
-            ML + pw + 3.0, sy, lbl
-        ));
-    }
-
-    // Rotated y-axis label.
-    let ylx = -(MT + ph / 2.0);
-    let y_label_svg = format!(
-        r#"  <text transform="rotate(-90)" x="{:.1}" y="18" text-anchor="middle" font-family='Georgia, serif' font-size="12" fill='#222">{}</text>"#,
-        ylx, y_label
-    );
-
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {VW} {VH}" width="{VW}" height="{VH}">
-  <rect width="{VW}" height="{VH}" fill="white"/>
-  <text x="{tx:.1}" y="32" text-anchor="middle" font-family='Georgia, serif' font-size="15" font-weight="bold" fill="black">{title}</text>
-{grid}
-{ref_svg}
-  <rect x="{ML:.1}" y="{MT:.1}" width="{pw:.1}" height="{ph:.1}" fill="none" stroke="black" stroke-width="1.2"/>
-  <polyline points="{pts}" fill="none" stroke="black" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
-  <text x="{ax:.1}" y="{ay:.1}" text-anchor="middle" font-family='Georgia, serif' font-size="12" fill='#222">{x_label}</text>
-{y_label_svg}
-</svg>"#,
-        tx = ML + pw / 2.0,
-        title = title,
-        ax = ML + pw / 2.0,
-        ay = VH - 8.0,
-        x_label = x_label,
-    )
+    png_from_rgb(&buf, 900, 400)
 }
 
-/// Generate a black-and-white scientific bar chart for the byte distribution.
-/// Draws a dashed horizontal line at the expected uniform frequency.
-fn svg_bar_chart(dist: &[f64; MAX_BYTE], title: &str) -> String {
-    const VW: f64 = 900.0;
-    const VH: f64 = 440.0;
-    const ML: f64 = 78.0;
-    const MR: f64 = 36.0;
-    const MT: f64 = 54.0;
-    const MB: f64 = 60.0;
-    let pw = VW - ML - MR;
-    let ph = VH - MT - MB;
-    let bw = pw / MAX_BYTE as f64;
+fn png_bar_chart(counts: &[usize; MAX_BYTE], title: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut buf = vec![0u8; 900 * 400 * 3];
+    {
+        let root      = BitMapBackend::with_buffer(&mut buf, (900, 400)).into_drawing_area();
+        root.fill(&WHITE)?;
+        let max_count = counts.iter().cloned().max().unwrap_or(0).max(1) as f64;
+        let total:    usize = counts.iter().sum();
+        let uniform   = total as f64 / MAX_BYTE as f64;
 
-    let max_f = dist.iter().cloned().fold(0.0f64, f64::max).max(f64::EPSILON);
-    let uniform_rel = (1.0 / MAX_BYTE as f64) / max_f;
-    let ref_y = MT + ph * (1.0 - uniform_rel);
+        let mut chart = ChartBuilder::on(&root)
+            .caption(title, ("sans-serif", 14).into_font())
+            .margin(10)
+            .x_label_area_size(44)
+            .y_label_area_size(72)
+            .build_cartesian_2d(0i32..256i32, 0.0f64..max_count * 1.08)?;
 
-    // Bars.
-    let mut bars_svg = String::new();
-    for (i, &f) in dist.iter().enumerate() {
-        let h = (f / max_f * ph).max(0.0);
-        let x = ML + i as f64 * bw;
-        let y = MT + ph - h;
-        bars_svg.push_str(&format!(
-            "  <rect x='{:.2}' y='{:.2}' width='{:.2}' height='{:.2}' fill='#222' stroke='none'/>\n",
-            x + 0.5, y, (bw - 1.0).max(0.5), h
-        ));
+        chart.configure_mesh()
+            .x_desc("Byte value (0x00 – 0xFF)")
+            .y_desc("Occurrences")
+            .x_labels(9)
+            .x_label_formatter(&|v| format!("0x{:02X}", *v as u8))
+            .y_label_formatter(&|v| format!("{}", *v as usize))
+            .draw()?;
+
+        chart.draw_series(
+            (0i32..256i32).map(|i| {
+                let count     = counts[i as usize] as f64;
+                let bar_style = if count > uniform * 1.5 {
+                    ShapeStyle::from(&RGBColor(180, 30, 30)).filled()
+                } else {
+                    ShapeStyle::from(&RGBColor(60, 60, 60)).filled()
+                };
+                Rectangle::new([(i, 0.0), (i + 1, count)], bar_style)
+            }),
+        )?;
+
+        chart.draw_series(std::iter::once(PathElement::new(
+            vec![(0i32, uniform), (256i32, uniform)],
+            ShapeStyle::from(&BLACK).stroke_width(1),
+        )))?;
+
+        root.present()?;
     }
-
-    // Y ticks.
-    let mut ticks = String::new();
-    for i in 0..=5 {
-        let frac = i as f64 / 5.0;
-        let val  = frac * max_f;
-        let sy   = MT + ph * (1.0 - frac);
-        ticks.push_str(&format!(
-            "  <line x1='{:.1}' y1='{:.1}' x2='{:.1}' y2='{:.1}' stroke='#e4e4e4' stroke-width='0.8'/>\n",
-            ML, sy, ML + pw, sy
-        ));
-        ticks.push_str(&format!(
-            "  <text x='{:.1}' y='{:.1}' text-anchor='end' dominant-baseline='middle' font-family='Georgia,serif' font-size='10' fill='#333'>{:.5}</text>\n",
-            ML - 4.0, sy, val
-        ));
-    }
-    // X tick labels every 32 bytes.
-    for i in 0..=8 {
-        let bv = i * 32usize;
-        let sx = ML + bv as f64 * bw;
-        ticks.push_str(&format!(
-            "  <text x='{:.1}' y='{:.1}' text-anchor='middle' dominant-baseline='hanging' font-family='Georgia,serif' font-size='10' fill='#333'>0x{:02X}</text>\n",
-            sx, MT + ph + 5.0, bv
-        ));
-    }
-
-    let ylx = -(MT + ph / 2.0);
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {VW} {VH}" width="{VW}" height="{VH}">
-  <rect width="{VW}" height="{VH}" fill="white"/>
-  <text x="{tx:.1}" y="32" text-anchor="middle" font-family='Georgia, serif' font-size="15" font-weight="bold" fill="black">{title}</text>
-{ticks}
-{bars_svg}
-  <line x1='{ML:.1}' y1='{ref_y:.1}' x2='{x2:.1}' y2='{ref_y:.1}' stroke='black' stroke-width='1.2' stroke-dasharray='7,4'/>
-  <text x='{lx:.1}' y='{ly:.1}' font-family='Georgia,serif' font-size='10' fill='#222' dominant-baseline='middle'>uniform</text>
-  <rect x="{ML:.1}" y="{MT:.1}" width="{pw:.1}" height="{ph:.1}" fill="none" stroke="black" stroke-width="1.2"/>
-  <text x="{ax:.1}" y="{ay:.1}" text-anchor="middle" font-family='Georgia, serif' font-size="12" fill='#222">Byte value</text>
-  <text transform="rotate(-90)" x="{ylx:.1}" y="18" text-anchor="middle" font-family='Georgia, serif' font-size="12" fill='#222">Relative frequency</text>
-</svg>"#,
-        tx = ML + pw / 2.0,
-        title = title,
-        x2 = ML + pw,
-        lx = ML + pw + 3.0,
-        ly = ref_y,
-        ax = ML + pw / 2.0,
-        ay = VH - 8.0,
-        ylx = ylx,
-    )
+    png_from_rgb(&buf, 900, 400)
 }
 
-fn save_svg(svg: String, stem: &str) {
+fn png_from_rgb(rgb: &[u8], w: u32, h: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(std::io::Cursor::new(&mut out), w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header()?;
+        writer.write_image_data(rgb)?;
+    }
+    Ok(out)
+}
+
+fn save_png(data: Vec<u8>, stem: &str) {
     if let Some(path) = FileDialog::new()
-        .set_file_name(&format!("{stem}.svg"))
-        .add_filter("SVG image", &["svg"])
+        .set_file_name(&format!("{stem}.png"))
+        .add_filter("PNG image", &["png"])
         .save_file()
     {
-        let _ = fs::write(path, svg.as_bytes());
+        let _ = fs::write(path, data);
     }
 }
-
-fn export_csv(result: &AnalysisResult, file_name: &str) {
-    let Some(path) = FileDialog::new()
-        .set_file_name(&format!("{file_name}_metrics.csv"))
-        .add_filter("CSV", &["csv"])
-        .save_file()
-    else { return; };
-
-    let mut out = String::from(
-        "offset_hex,entropy_bits,chi2_stat,chi2_pvalue,serial_corr,hamming_bits_per_byte,bigram_uniq,trigram_uniq,suspicious\n"
-    );
-    let get = |series: &[[f64; 2]], i: usize| {
-        series.get(i).map(|p| p[1]).unwrap_or(f64::NAN)
-    };
-    for (i, reg) in result.regions.iter().enumerate() {
-        out.push_str(&format!(
-            "0x{:08X},{:.6},{:.4},{:.6},{:.6},{:.6},{:.6},{:.6},{}\n",
-            reg.offset,
-            reg.entropy,
-            reg.chi2,
-            reg.chi2_p,
-            reg.serial_corr,
-            reg.hamming,
-            get(&result.bigram_scores,  i),
-            get(&result.trigram_scores, i),
-            if reg.suspicious { 1 } else { 0 },
-        ));
-    }
-    let _ = fs::write(path, out.as_bytes());
-}
-
-// ── Dynamic anomaly thresholds ────────────────────────────────────────────────
 
 #[derive(Clone, Default)]
 struct AnomalyThresholds {
@@ -431,14 +311,11 @@ impl AnomalyThresholds {
     }
 }
 
-// ── Data model ────────────────────────────────────────────────────────────────
-
 #[derive(Clone)]
 struct RegionInsight {
     offset:      usize,
     entropy:     f64,
     chi2:        f64,
-    /// Chi² p-value for this window (df = 255).
     chi2_p:      f64,
     serial_corr: f64,
     hamming:     f64,
@@ -452,6 +329,7 @@ struct AnalysisResult {
     serial_corr:    Vec<[f64; 2]>,
     hamming:        Vec<[f64; 2]>,
     byte_dist:      [f64; MAX_BYTE],
+    byte_counts:    [usize; MAX_BYTE],
     bigram_scores:  Vec<[f64; 2]>,
     trigram_scores: Vec<[f64; 2]>,
     regions:        Vec<RegionInsight>,
@@ -468,6 +346,7 @@ impl Default for AnalysisResult {
             serial_corr:    Vec::new(),
             hamming:        Vec::new(),
             byte_dist:      [0.0; MAX_BYTE],
+            byte_counts:    [0usize; MAX_BYTE],
             bigram_scores:  Vec::new(),
             trigram_scores: Vec::new(),
             regions:        Vec::new(),
@@ -478,61 +357,34 @@ impl Default for AnalysisResult {
     }
 }
 
-// ── Reorderable metric slots ──────────────────────────────────────────────────
-
-#[derive(Clone)]
-struct MetricSlot {
-    key:   &'static str,
-    label: &'static str,
-    unit:  &'static str,
-    norm:  bool,
-}
-
-fn default_metric_order() -> Vec<MetricSlot> {
-    vec![
-        MetricSlot { key: "entropy",  label: "Entropy",            unit: "bits / symbol", norm: true  },
-        MetricSlot { key: "chi2",     label: "Chi²",               unit: "statistic",     norm: true  },
-        MetricSlot { key: "serial",   label: "Serial Correlation", unit: "ρ",             norm: false },
-        MetricSlot { key: "hamming",  label: "Hamming Weight",     unit: "bits / byte",   norm: true  },
-        MetricSlot { key: "bigram",   label: "Bigram Uniqueness",  unit: "ratio",         norm: true  },
-        MetricSlot { key: "trigram",  label: "Trigram Uniqueness", unit: "ratio",         norm: true  },
-    ]
-}
-
-// ── File ──────────────────────────────────────────────────────────────────────
-
 struct BinaryFile {
     name:   String,
     data:   Vec<u8>,
     result: Option<AnalysisResult>,
 }
 
-// ── App state ─────────────────────────────────────────────────────────────────
-
 struct App {
-    files:         Vec<BinaryFile>,
-    window_size:   usize,
-    sel_file:      usize,
-    active_tab:    usize,
-    metric_order:  Vec<MetricSlot>,
-    show_hex:      bool,
-    anomaly_k:     f64,
-    hex_highlight: Option<(usize, usize)>,
-    hex_do_scroll: bool,
+    files:              Vec<BinaryFile>,
+    window_size:        usize,
+    sel_file:           usize,
+    active_tab:         usize,
+    show_hex:           bool,
+    anomaly_k:          f64,
+    hex_highlight:      Option<(usize, usize)>,
+    hex_scroll_pending: Option<usize>,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self {
-            files:         Vec::new(),
-            window_size:   512,
-            sel_file:      0,
-            active_tab:    0,
-            metric_order:  default_metric_order(),
-            show_hex:      false,
-            anomaly_k:     2.0,
-            hex_highlight: None,
-            hex_do_scroll: false,
+            files:              Vec::new(),
+            window_size:        512,
+            sel_file:           0,
+            active_tab:         0,
+            show_hex:           false,
+            anomaly_k:          2.0,
+            hex_highlight:      None,
+            hex_scroll_pending: None,
         }
     }
 }
@@ -549,25 +401,29 @@ impl App {
     }
 
     fn analyze(data: &[u8], w: usize, k: f64) -> AnalysisResult {
-        let mut r = AnalysisResult::default();
+        let mut r     = AnalysisResult::default();
         r.window_size = w;
         if data.is_empty() { return r; }
 
-        // Global byte frequency distribution.
+        let len_f    = data.len() as f64;
         let mut hist = [0usize; MAX_BYTE];
         for &b in data { hist[b as usize] += 1; }
-        let len_f = data.len() as f64;
-        for i in 0..MAX_BYTE { r.byte_dist[i] = hist[i] as f64 / len_f; }
+        for i in 0..MAX_BYTE {
+            r.byte_dist[i]   = hist[i] as f64 / len_f;
+            r.byte_counts[i] = hist[i];
+        }
 
         let step = w.max(1);
-        for offset in (0..=data.len().saturating_sub(w)).step_by(step) {
-            let s = &data[offset..offset + w];
+        for offset in (0..data.len().saturating_sub(w) + 1).step_by(step) {
+            let end = (offset + w).min(data.len());
+            if end - offset < w { break; }
+            let s  = &data[offset..end];
             let c2 = compute_chi2(s);
-            r.entropy.push([offset as f64, compute_entropy(s)]);
-            r.chi2.push([offset as f64, c2]);
-            r.serial_corr.push([offset as f64, serial_correlation(s)]);
-            r.hamming.push([offset as f64, hamming_weight(s)]);
-            r.bigram_scores.push([offset as f64, ngram_uniqueness(s, 2)]);
+            r.entropy.push([offset as f64,       compute_entropy(s)]);
+            r.chi2.push([offset as f64,           c2]);
+            r.serial_corr.push([offset as f64,    serial_correlation(s)]);
+            r.hamming.push([offset as f64,         hamming_weight(s)]);
+            r.bigram_scores.push([offset as f64,  ngram_uniqueness(s, 2)]);
             r.trigram_scores.push([offset as f64, ngram_uniqueness(s, 3)]);
         }
 
@@ -586,25 +442,23 @@ impl App {
         }
         r.thresholds = thr;
 
-        // Aggregate statistics.
-        let global_chi2 = compute_chi2(data);
-        let (ks_d, ks_p) = ks_uniform_test(data);
+        let global_chi2   = compute_chi2(data);
+        let (ks_d, ks_p)  = ks_uniform_test(data);
         let (runs_z, runs_p) = runs_test(data);
         let mean_window_p = if r.regions.is_empty() { 1.0 } else {
             r.regions.iter().map(|reg| reg.chi2_p).sum::<f64>() / r.regions.len() as f64
         };
         r.stats = FileStatistics {
-            entropy_stats:  MetricStats::from_series(&r.entropy),
-            chi2_stats:     MetricStats::from_series(&r.chi2),
-            serial_stats:   MetricStats::from_series(&r.serial_corr),
-            hamming_stats:  MetricStats::from_series(&r.hamming),
+            entropy_stats: MetricStats::from_series(&r.entropy),
+            chi2_stats:    MetricStats::from_series(&r.chi2),
+            serial_stats:  MetricStats::from_series(&r.serial_corr),
+            hamming_stats: MetricStats::from_series(&r.hamming),
             ks_d, ks_p,
             global_chi2,
-            global_chi2_p:  chi2_pvalue(global_chi2, 255),
+            global_chi2_p: chi2_pvalue(global_chi2, 255),
             runs_z, runs_p,
             mean_window_p,
         };
-
         r
     }
 
@@ -616,8 +470,6 @@ impl App {
         result.thresholds = thr;
     }
 }
-
-// ── Math ──────────────────────────────────────────────────────────────────────
 
 fn compute_entropy(data: &[u8]) -> f64 {
     if data.is_empty() { return 0.0; }
@@ -661,20 +513,10 @@ fn hamming_weight(data: &[u8]) -> f64 {
 
 fn ngram_uniqueness(data: &[u8], n: usize) -> f64 {
     if data.len() < n { return 0.0; }
-    let total = data.len() - n + 1;
+    let total  = data.len() - n + 1;
     let unique: HashSet<&[u8]> = (0..total).map(|i| &data[i..i + n]).collect();
     unique.len() as f64 / total as f64
 }
-
-fn normalize(data: &[[f64; 2]]) -> (Vec<[f64; 2]>, f64, f64) {
-    if data.is_empty() { return (Vec::new(), 0.0, 1.0); }
-    let min   = data.iter().map(|p| p[1]).fold(f64::INFINITY,     f64::min);
-    let max   = data.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
-    let range = (max - min).max(f64::EPSILON);
-    (data.iter().map(|p| [p[0], (p[1] - min) / range]).collect(), min, max)
-}
-
-// ── UI helpers ────────────────────────────────────────────────────────────────
 
 fn card_frame() -> Frame {
     Frame {
@@ -687,19 +529,9 @@ fn card_frame() -> Frame {
     }
 }
 
-fn badge(ui: &mut egui::Ui, label: &str, fg: Color32, bg: Color32) {
-    let font_id = FontId::proportional(11.0);
-    let text_width = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font_id.clone(), fg).size().x);
-    let desired = Vec2::new(text_width + 18.0, 20.0);
-    let (rect, _) = ui.allocate_at_least(desired, egui::Sense::hover());
-    ui.painter().rect_filled(rect, Rounding::same(4.0), bg);
-    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, label, font_id, fg);
-}
-
-/// Small export button.  Returns `true` if clicked.
-fn export_btn(ui: &mut egui::Ui) -> bool {
+fn png_btn(ui: &mut egui::Ui) -> bool {
     ui.add(
-        egui::Button::new(RichText::new("⬇ SVG").size(10.0).color(pal::RED))
+        egui::Button::new(RichText::new("⬇ PNG").size(10.0).color(pal::RED))
             .fill(pal::RED_FAINT)
             .stroke(Stroke::new(1.0, pal::RED_MID))
             .rounding(Rounding::same(3.0))
@@ -707,163 +539,165 @@ fn export_btn(ui: &mut egui::Ui) -> bool {
     ).clicked()
 }
 
-fn metric_data<'a>(slot: &MetricSlot, result: &'a AnalysisResult) -> &'a [[f64; 2]] {
-    match slot.key {
-        "entropy" => &result.entropy,
-        "chi2"    => &result.chi2,
-        "serial"  => &result.serial_corr,
-        "hamming" => &result.hamming,
-        "bigram"  => &result.bigram_scores,
-        "trigram" => &result.trigram_scores,
-        _         => &[],
+const PLOT_HEIGHT: f32 = 155.0;
+
+fn plot_one_metric(
+    ui:       &mut egui::Ui,
+    title:    &str,
+    unit:     &str,
+    data:     &[[f64; 2]],
+    bands:    Option<(f64, f64, f64)>,
+    file_idx: usize,
+    plot_id:  usize,
+) -> Option<usize> {
+    let (y_min, y_max) = if data.is_empty() {
+        (0.0, 1.0)
+    } else {
+        let lo = data.iter().map(|p| p[1]).fold(f64::INFINITY,     f64::min);
+        let hi = data.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
+        let lo = bands.map(|(m, s, k)| lo.min(m - k * s)).unwrap_or(lo);
+        let hi = bands.map(|(m, s, k)| hi.max(m + k * s)).unwrap_or(hi);
+        (lo, hi)
+    };
+
+    let pr = Plot::new(format!("metric_{file_idx}_{plot_id}"))
+        .height(PLOT_HEIGHT)
+        .show_axes([true, true])
+        .show_grid([true, true])
+        .include_y(y_min)
+        .include_y(y_max)
+        .auto_bounds([true, false].into())
+        .set_margin_fraction(Vec2::new(0.02, 0.10))
+        .x_axis_formatter(|mark, _, _| format!("0x{:X}", mark.value as usize))
+        .y_axis_formatter(|mark, _, _| format!("{:.3}", mark.value))
+        .label_formatter(move |name, point| {
+            format!("offset: 0x{:X}\n{}: {:.4}", point.x as usize, name, point.y)
+        })
+        .show(ui, |pui| {
+            pui.line(
+                Line::new(PlotPoints::from(data.to_vec()))
+                    .color(pal::RED)
+                    .width(1.5)
+                    .name(title),
+            );
+            if let Some((mean, sd, k)) = bands {
+                pui.hline(HLine::new(mean)
+                    .color(Color32::from_rgb(80, 80, 80)).width(1.2).name("μ"));
+                pui.hline(HLine::new(mean + k * sd)
+                    .color(Color32::from_rgb(160, 160, 160)).width(1.0)
+                    .style(egui_plot::LineStyle::Dashed { length: 6.0 }).name("μ+kσ"));
+                pui.hline(HLine::new(mean - k * sd)
+                    .color(Color32::from_rgb(160, 160, 160)).width(1.0)
+                    .style(egui_plot::LineStyle::Dashed { length: 6.0 }).name("μ−kσ"));
+            }
+        });
+
+    if pr.response.hovered() {
+        ui.input_mut(|i| {
+            i.smooth_scroll_delta = Vec2::ZERO;
+            i.raw_scroll_delta    = Vec2::ZERO;
+        });
     }
-}
 
-/// Returns a (mean, sd) pair for the chosen metric slot from its stats field.
-fn metric_mean_sd(slot: &MetricSlot, result: &AnalysisResult) -> Option<(f64, f64)> {
-    let ms = match slot.key {
-        "entropy" => &result.stats.entropy_stats,
-        "chi2"    => &result.stats.chi2_stats,
-        "serial"  => &result.stats.serial_stats,
-        "hamming" => &result.stats.hamming_stats,
-        _         => return None,
-    };
-    Some((ms.mean, ms.sd))
-}
-
-/// Plot one windowed metric.
-/// `stat_ref`: if Some((mean, sd)), draws μ and μ±k·σ reference lines.
-fn plot_metric(
-    ui:           &mut egui::Ui,
-    title:        &str,
-    unit:         &str,
-    data:         &[[f64; 2]],
-    file_index:   usize,
-    slot_index:   usize,
-    do_normalize: bool,
-    stat_ref:     Option<(f64, f64, f64)>,  // (mean, sd, k)
-) {
-    let (plot_pts, raw_min, raw_max) = if do_normalize {
-        normalize(data)
-    } else {
-        let min = data.iter().map(|p| p[1]).fold(f64::INFINITY,     f64::min);
-        let max = data.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
-        (data.to_vec(), min, max)
-    };
-
-    // Reference line values in the plot's y-coordinate space.
-    let hlines: Vec<(f64, &str)> = if let Some((mean, sd, k)) = stat_ref {
-        if do_normalize {
-            let range = (raw_max - raw_min).max(f64::EPSILON);
-            let to_n = |v: f64| (v - raw_min) / range;
-            vec![
-                (to_n(mean),          "μ"),
-                (to_n(mean + k * sd), "μ+kσ"),
-                (to_n(mean - k * sd), "μ−kσ"),
-            ]
-        } else {
-            vec![
-                (mean,          "μ"),
-                (mean + k * sd, "μ+kσ"),
-                (mean - k * sd, "μ−kσ"),
-            ]
+    if pr.response.secondary_clicked() {
+        if let Some(pointer) = pr.response.interact_pointer_pos() {
+            let plot_pos = pr.transform.value_from_position(pointer);
+            return Some(plot_pos.x.max(0.0) as usize);
         }
-    } else {
-        vec![]
-    };
+    }
 
+    None
+}
+
+fn plot_metrics_row(
+    ui:      &mut egui::Ui,
+    title:   &str,
+    unit:    &str,
+    entries: &[(&[[f64; 2]], Option<(f64, f64, f64)>, usize, &str)],
+    col_w:   f32,
+    row_id:  usize,
+) -> Option<(usize, usize)> {
+    let mut clicked: Option<(usize, usize)> = None;
     card_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(title).strong().color(pal::TEXT).size(13.0));
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Export button — rightmost.
-                if export_btn(ui) {
-                    // Build SVG reference lines from raw stat values.
-                    let svg_refs: Vec<(f64, &str)> = if let Some((mean, sd, k)) = stat_ref {
-                        vec![
-                            (mean,          "μ"),
-                            (mean + k * sd, "μ+kσ"),
-                            (mean - k * sd, "μ−kσ"),
-                        ]
-                    } else { vec![] };
-                    let svg = svg_line_chart(
-                        data,
-                        title,
-                        "File offset",
-                        &format!("{title} ({unit})"),
-                        &svg_refs,
-                    );
-                    save_svg(svg, &format!("{title}_{file_index}").to_lowercase().replace(' ', "_"));
-                }
-
-                let range_label = if do_normalize {
-                    format!("{unit}  [{:.3} – {:.3}]  norm.", raw_min, raw_max)
-                } else {
-                    format!("{unit}  [{:.3} – {:.3}]", raw_min, raw_max)
-                };
-                ui.label(RichText::new(range_label).size(11.0).color(pal::MUTED));
-            });
+            ui.label(
+                RichText::new(format!("{title}  ({unit})"))
+                    .strong().color(pal::TEXT).size(12.0),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("right-click → jump to hex")
+                    .size(10.0).color(pal::MUTED).italics(),
+            );
         });
-        ui.add_space(6.0);
+        ui.add_space(4.0);
 
-        let colors = [
-            Color32::from_rgb(180, 180, 180), // μ
-            Color32::from_rgb(200, 100, 100), // μ+kσ
-            Color32::from_rgb(200, 100, 100), // μ−kσ
-        ];
-        let hline_labels = ["μ", "μ+kσ", "μ−kσ"];
+        // Use allocate_ui_with_layout with an EXPLICIT height instead of
+        // horizontal_top.  horizontal_top hands each child the full
+        // available_rect_before_wrap() height; inside a non-shrinking
+        // ScrollArea that is the entire viewport.  On the first frame a new
+        // plot widget appears its cached size is unknown, so min_rect comes
+        // back as the full available rect and the card fills the screen.
+        // Pre-committing the rect here prevents that entirely.
+        let row_h = PLOT_HEIGHT
+            + ui.text_style_height(&egui::TextStyle::Body)   // filename label
+            + ui.text_style_height(&egui::TextStyle::Body)   // png button row
+            + ui.spacing().item_spacing.y * 4.0;
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), row_h),
+            egui::Layout::left_to_right(egui::Align::TOP),
+            |ui| {
+            let n = entries.len();
+            for (col_i, (data, bands, file_idx, file_name)) in entries.iter().enumerate() {
+                ui.vertical(|ui| {
+                    ui.set_max_width(col_w);
+                    ui.set_max_height(row_h);
 
-        Plot::new(format!("{}_{}_{}", title, file_index, slot_index))
-            .height(160.0)
-            .legend(Legend::default())
-            .show_axes([true, true])
-            .show_grid([true, true])
-            .auto_bounds([true, true].into())
-            .set_margin_fraction(Vec2::new(0.02, 0.12))
-            .x_axis_formatter(|mark, _, _| format!("0x{:X}", mark.value as usize))
-            .y_axis_formatter(|mark, _, _| format!("{:.3}", mark.value))
-            .label_formatter(move |name, point| {
-                if do_normalize {
-                    let real = point.y * (raw_max - raw_min) + raw_min;
-                    format!(
-                        "offset: 0x{:X}\n{}: {:.4} (norm)\nraw:    {:.4}",
-                        point.x as usize, name, point.y, real
-                    )
-                } else {
-                    format!("offset: 0x{:X}\n{}: {:.4}", point.x as usize, name, point.y)
+                    if n > 1 {
+                        let short = if file_name.len() > 30 {
+                            format!("…{}", &file_name[file_name.len().saturating_sub(27)..])
+                        } else {
+                            (*file_name).to_string()
+                        };
+                        ui.label(RichText::new(short).size(10.0).color(pal::MUTED).italics());
+                    }
+
+                    if let Some(off) = plot_one_metric(
+                        ui, title, unit, data, *bands, *file_idx,
+                        row_id * 64 + col_i,
+                    ) {
+                        clicked = Some((*file_idx, off));
+                    }
+
+                    ui.horizontal(|ui| {
+                        if png_btn(ui) {
+                            let label = format!("{title} ({unit})");
+                            match png_line_chart(data, title, "File offset (bytes)", &label, *bands) {
+                                Ok(png) => save_png(
+                                    png,
+                                    &format!("{}_{file_idx}", title.to_lowercase().replace(' ', "_")),
+                                ),
+                                Err(e) => eprintln!("PNG export error: {e}"),
+                            }
+                        }
+                    });
+                });
+
+                if col_i + 1 < n {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
                 }
-            })
-            .show(ui, |plot_ui| {
-                plot_ui.line(
-                    Line::new(PlotPoints::from(plot_pts))
-                        .color(pal::RED)
-                        .width(1.6)
-                        .name(title),
-                );
-                for (i, &(y_val, lbl)) in hlines.iter().enumerate() {
-                    plot_ui.hline(
-                        HLine::new(y_val)
-                            .color(colors[i])
-                            .width(if i == 0 { 1.5 } else { 1.0 })
-                            .style(if i == 0 {
-                                egui_plot::LineStyle::Solid
-                            } else {
-                                egui_plot::LineStyle::Dashed { length: 6.0 }
-                            })
-                            .name(lbl),
-                    );
-                }
-            });
+            }
+        });
     });
+    clicked
 }
 
-/// Byte-distribution bar chart panel.
-/// Returns `true` if the export button was clicked.
-fn plot_distribution(ui: &mut egui::Ui, result: &AnalysisResult, file_name: &str, file_index: usize) {
-    let max_freq = result.byte_dist.iter().cloned().fold(0.0f64, f64::max).max(f64::EPSILON);
-    // Expected frequency under uniform distribution (for reference line).
-    let uniform_freq_norm = (1.0 / MAX_BYTE as f64) / max_freq;
+fn plot_distribution(ui: &mut egui::Ui, result: &AnalysisResult, file_name: &str, file_idx: usize) {
+    let counts        = &result.byte_counts;
+    let total: usize  = counts.iter().sum();
+    let uniform_count = total as f64 / MAX_BYTE as f64;
 
     card_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -871,20 +705,26 @@ fn plot_distribution(ui: &mut egui::Ui, result: &AnalysisResult, file_name: &str
                 RichText::new("Byte Frequency Distribution")
                     .strong().color(pal::TEXT).size(13.0),
             );
+            ui.add_space(4.0);
+            ui.label(RichText::new("·").size(12.0).color(pal::BORDER));
+            ui.add_space(2.0);
+            let display = if file_name.len() > 40 {
+                format!("…{}", &file_name[file_name.len() - 37..])
+            } else {
+                file_name.to_owned()
+            };
+            ui.label(RichText::new(display).size(11.0).color(pal::MUTED).italics());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if export_btn(ui) {
-                    let svg = svg_bar_chart(
-                        &result.byte_dist,
-                        &format!("Byte Frequency Distribution — {file_name}"),
-                    );
-                    save_svg(svg, &format!("byte_dist_{file_index}"));
+                if png_btn(ui) {
+                    let title = format!("Byte Frequency Distribution — {file_name}");
+                    match png_bar_chart(counts, &title) {
+                        Ok(png) => save_png(png, &format!("byte_dist_{file_idx}")),
+                        Err(e)  => eprintln!("PNG export error: {e}"),
+                    }
                 }
                 ui.label(
-                    RichText::new(format!(
-                        "0x00 – 0xFF  ·  normalised  [max={:.5}]", max_freq
-                    ))
-                    .size(11.0)
-                    .color(pal::MUTED),
+                    RichText::new(format!("max occurrences = {}", counts.iter().cloned().max().unwrap_or(0)))
+                        .size(11.0).color(pal::MUTED),
                 );
             });
         });
@@ -892,29 +732,44 @@ fn plot_distribution(ui: &mut egui::Ui, result: &AnalysisResult, file_name: &str
 
         let bars: Vec<Bar> = (0..MAX_BYTE)
             .map(|i| {
-                Bar::new(i as f64, result.byte_dist[i] / max_freq)
-                    .width(0.8)
-                    .fill(pal::RED_MID)
-                    .stroke(Stroke::new(0.0, pal::RED))
+                let count = counts[i] as f64;
+                Bar::new(i as f64, count)
+                    .width(0.9)
+                    .fill(if count > uniform_count * 1.5 { pal::RED } else { pal::RED_MID })
+                    .stroke(Stroke::NONE)
                     .name(format!("0x{:02X}", i))
             })
             .collect();
 
-        Plot::new(format!("byte_dist_{}", file_index))
-            .height(200.0)
+        Plot::new(format!("byte_dist_{file_idx}"))
+            .height(220.0)
             .show_grid([true, true])
-            .auto_bounds([true, true].into())
-            .x_axis_formatter(|mark, _, _| format!("0x{:02X}", mark.value as u8))
-            .y_axis_formatter(|mark, _, _| format!("{:.3}", mark.value))
+            .include_x(0.0)
+            .include_x(255.0)
+            .include_y(0.0)
+            .auto_bounds([false, true].into())
+            .x_axis_formatter(|mark, _, _| {
+                let v = mark.value.round() as i64;
+                if v >= 0 && v <= 255 && v % 32 == 0 {
+                    format!("0x{:02X}", v as u8)
+                } else {
+                    String::new()
+                }
+            })
+            .y_axis_formatter(|mark, _, _| {
+                let v = mark.value as usize;
+                if      v >= 1_000_000 { format!("{}M", v / 1_000_000) }
+                else if v >= 1_000     { format!("{}k", v / 1_000) }
+                else                   { format!("{v}") }
+            })
             .label_formatter(move |name, point| {
-                format!("byte: {}\nrel. freq: {:.5}", name, point.y * max_freq)
+                format!("byte: {}\noccurrences: {}", name, point.y as usize)
             })
             .show(ui, |pui| {
-                pui.bar_chart(BarChart::new(bars).color(pal::RED).name("freq"));
-                // Uniform reference.
+                pui.bar_chart(BarChart::new(bars).color(pal::RED).name("count"));
                 pui.hline(
-                    HLine::new(uniform_freq_norm)
-                        .color(Color32::from_rgb(100, 100, 100))
+                    HLine::new(uniform_count)
+                        .color(Color32::from_rgb(80, 80, 80))
                         .width(1.2)
                         .style(egui_plot::LineStyle::Dashed { length: 6.0 })
                         .name("uniform"),
@@ -923,31 +778,43 @@ fn plot_distribution(ui: &mut egui::Ui, result: &AnalysisResult, file_name: &str
     });
 }
 
-/// Anomalous-regions table.
-/// Returns `Some(byte_offset)` if the user clicked a row.
-fn suspicious_regions(ui: &mut egui::Ui, result: &AnalysisResult) -> Option<usize> {
-    let suspicious: Vec<&RegionInsight> =
-        result.regions.iter().filter(|r| r.suspicious).collect();
+fn suspicious_regions(ui: &mut egui::Ui, result: &AnalysisResult, file_name: &str, file_idx: usize) -> Option<usize> {
+    let suspicious: Vec<&RegionInsight> = result.regions.iter().filter(|r| r.suspicious).collect();
     let mut jump_to: Option<usize> = None;
 
     card_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Anomalous Regions").strong().color(pal::TEXT).size(13.0));
+            ui.add_space(4.0);
+            ui.label(RichText::new("·").size(12.0).color(pal::BORDER));
+            ui.add_space(2.0);
+            let display = if file_name.len() > 40 {
+                format!("…{}", &file_name[file_name.len() - 37..])
+            } else {
+                file_name.to_owned()
+            };
+            ui.label(RichText::new(display).size(11.0).color(pal::MUTED).italics());
             ui.add_space(6.0);
-            badge(ui, &format!("{} flagged", suspicious.len()), pal::RED, pal::RED_LIGHT);
-            ui.add_space(8.0);
-            let t = &result.thresholds;
-            ui.label(
-                RichText::new(format!(
-                    "entropy μ={:.3} σ={:.3}  ·  χ² μ={:.1} σ={:.1}  ·  serial μ={:.4} σ={:.4}",
-                    t.entropy_mean, t.entropy_sd,
-                    t.chi2_mean,    t.chi2_sd,
-                    t.serial_mean,  t.serial_sd,
-                ))
-                .size(10.0)
-                .color(pal::MUTED),
-            );
+
+            let n       = suspicious.len();
+            let (fg, bg) = if n > 0 { (pal::RED, pal::RED_LIGHT) } else { (pal::MUTED, pal::PANEL) };
+            let lbl     = format!("{n} flagged");
+            let font    = egui::FontId::proportional(11.0);
+            let tw      = ui.fonts(|f| f.layout_no_wrap(lbl.clone(), font.clone(), fg).size().x);
+            let (rect, _) = ui.allocate_at_least(Vec2::new(tw + 18.0, 20.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, Rounding::same(4.0), bg);
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, &lbl, font, fg);
         });
+
+        ui.add_space(4.0);
+        let t = &result.thresholds;
+        ui.label(
+            RichText::new(format!(
+                "entropy μ={:.3} σ={:.3}  ·  χ² μ={:.1} σ={:.1}  ·  serial μ={:.4} σ={:.4}",
+                t.entropy_mean, t.entropy_sd, t.chi2_mean, t.chi2_sd, t.serial_mean, t.serial_sd,
+            ))
+            .size(10.0).color(pal::MUTED),
+        );
         ui.add_space(4.0);
         ui.label(
             RichText::new("Click a row to jump to that offset in the Hex Dump.")
@@ -960,44 +827,40 @@ fn suspicious_regions(ui: &mut egui::Ui, result: &AnalysisResult) -> Option<usiz
             return;
         }
 
-        let cols = ["Offset", "Entropy", "Chi²", "p(χ²)", "Serial ρ", "Hamming", ""];
-        egui::Grid::new("regions_grid")
-            .num_columns(cols.len())
+        egui::Grid::new(format!("regions_grid_{file_idx}"))
+            .num_columns(7)
             .striped(true)
             .min_col_width(72.0)
             .spacing([10.0, 6.0])
             .show(ui, |ui| {
-                for col in &cols {
-                    ui.label(RichText::new(*col).size(11.0).color(pal::MUTED).strong());
+                for h in &["Offset", "Entropy", "Chi²", "p(χ²)", "Serial ρ", "Hamming", ""] {
+                    ui.label(RichText::new(*h).size(11.0).color(pal::MUTED).strong());
                 }
                 ui.end_row();
 
                 for reg in &suspicious {
-                    let resp_offset = ui.add(egui::SelectableLabel::new(
+                    let resp  = ui.add(egui::SelectableLabel::new(
                         false,
                         RichText::new(format!("0x{:08X}", reg.offset)).monospace().size(12.0),
                     ));
-                    ui.label(RichText::new(format!("{:.4}", reg.entropy)).monospace().size(12.0));
-                    ui.label(RichText::new(format!("{:.2}",  reg.chi2)).monospace().size(12.0));
-
-                    // p-value column: red if significant, green if not.
-                    let p_col = if reg.chi2_p < 0.05 { pal::RED } else { pal::GREEN };
-                    ui.label(
-                        RichText::new(format!("{:.4}", reg.chi2_p))
-                            .monospace().size(12.0).color(p_col),
-                    );
-
-                    ui.label(RichText::new(format!("{:.4}", reg.serial_corr)).monospace().size(12.0));
-                    ui.label(RichText::new(format!("{:.4}", reg.hamming)).monospace().size(12.0));
-
-                    let go = ui.add(
+                    let r_ent = ui.add(egui::Label::new(RichText::new(format!("{:.4}", reg.entropy)).monospace().size(12.0)).sense(egui::Sense::click()));
+                    let r_c2  = ui.add(egui::Label::new(RichText::new(format!("{:.2}",  reg.chi2)).monospace().size(12.0)).sense(egui::Sense::click()));
+                    let pc    = if reg.chi2_p < 0.05 { pal::RED } else { pal::GREEN };
+                    let r_c2p = ui.add(egui::Label::new(RichText::new(format!("{:.4}", reg.chi2_p)).monospace().size(12.0).color(pc)).sense(egui::Sense::click()));
+                    let r_ser = ui.add(egui::Label::new(RichText::new(format!("{:.4}", reg.serial_corr)).monospace().size(12.0)).sense(egui::Sense::click()));
+                    let r_ham = ui.add(egui::Label::new(RichText::new(format!("{:.4}", reg.hamming)).monospace().size(12.0)).sense(egui::Sense::click()));
+                    let go    = ui.add(
                         egui::Button::new(RichText::new("⟶ Hex").size(11.0).color(pal::RED))
-                            .fill(pal::RED_FAINT)
-                            .stroke(Stroke::new(1.0, pal::RED_MID))
-                            .rounding(Rounding::same(4.0))
-                            .min_size(Vec2::new(56.0, 18.0)),
+                            .fill(pal::RED_FAINT).stroke(Stroke::new(1.0, pal::RED_MID))
+                            .rounding(Rounding::same(4.0)).min_size(Vec2::new(56.0, 18.0)),
                     );
-                    if resp_offset.clicked() || go.clicked() {
+                    let any_right = resp.secondary_clicked()
+                        || r_ent.secondary_clicked()
+                        || r_c2.secondary_clicked()
+                        || r_c2p.secondary_clicked()
+                        || r_ser.secondary_clicked()
+                        || r_ham.secondary_clicked();
+                    if resp.clicked() || go.clicked() || any_right {
                         jump_to = Some(reg.offset);
                     }
                     ui.end_row();
@@ -1008,106 +871,53 @@ fn suspicious_regions(ui: &mut egui::Ui, result: &AnalysisResult) -> Option<usiz
     jump_to
 }
 
-/// Statistics summary tab.
-fn statistics_tab(
-    ui:        &mut egui::Ui,
-    result:    &AnalysisResult,
-    file_name: &str,
-    file_index: usize,
-) {
+fn statistics_tab(ui: &mut egui::Ui, result: &AnalysisResult, file_name: &str, file_idx: usize) {
     let s = &result.stats;
 
-    // ── Global randomness tests ──────────────────────────────────────────────
     card_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("Global Randomness Tests")
-                    .strong().color(pal::TEXT).size(13.0),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(
-                    egui::Button::new(RichText::new("⬇ CSV").size(10.0).color(pal::RED))
-                        .fill(pal::RED_FAINT)
-                        .stroke(Stroke::new(1.0, pal::RED_MID))
-                        .rounding(Rounding::same(3.0))
-                        .min_size(Vec2::new(44.0, 16.0)),
-                ).clicked() {
-                    export_csv(result, file_name);
-                }
-            });
+            ui.label(RichText::new("Global Randomness Tests").strong().color(pal::TEXT).size(13.0));
+            ui.add_space(4.0);
+            ui.label(RichText::new("·").size(12.0).color(pal::BORDER));
+            ui.add_space(2.0);
+            let display = if file_name.len() > 40 {
+                format!("…{}", &file_name[file_name.len() - 37..])
+            } else {
+                file_name.to_owned()
+            };
+            ui.label(RichText::new(display).size(11.0).color(pal::MUTED).italics());
         });
         ui.add_space(2.0);
         ui.label(
-            RichText::new(
-                "H₀: bytes are i.i.d. Uniform{0,…,255}.  Significance level α = 0.05.",
-            )
-            .size(10.0)
-            .color(pal::MUTED)
-            .italics(),
+            RichText::new("H₀: bytes are i.i.d. Uniform{0,…,255}.  Significance level α = 0.05.")
+                .size(10.0).color(pal::MUTED).italics(),
         );
         ui.add_space(8.0);
 
         let rows: &[(&str, &str, f64, f64, &str, &str)] = &[
-            (
-                "Kolmogorov–Smirnov",
-                &format!("D = {:.5}", s.ks_d),
-                s.ks_p,
-                0.05,
-                "Non-uniform distribution",
-                "Consistent with Uniform[0,255]",
-            ),
-            (
-                "Chi² (global, df=255)",
-                &format!("χ² = {:.2}", s.global_chi2),
-                s.global_chi2_p,
-                0.05,
-                "Non-uniform distribution",
-                "Consistent with Uniform[0,255]",
-            ),
-            (
-                "Wald–Wolfowitz runs",
-                &format!("Z = {:.4}", s.runs_z),
-                s.runs_p,
-                0.05,
-                "Non-random sequential structure",
-                "Consistent with independent draws",
-            ),
+            ("Kolmogorov–Smirnov",    &format!("D = {:.5}",   s.ks_d),         s.ks_p,          0.05, "Non-uniform distribution",        "Consistent with Uniform[0,255]"),
+            ("Chi² (global, df=255)", &format!("χ² = {:.2}",  s.global_chi2),  s.global_chi2_p, 0.05, "Non-uniform distribution",        "Consistent with Uniform[0,255]"),
+            ("Wald–Wolfowitz runs",   &format!("Z = {:.4}",   s.runs_z),        s.runs_p,        0.05, "Non-random sequential structure", "Consistent with independent draws"),
         ];
 
-        egui::Grid::new("global_tests_grid")
-            .num_columns(5)
-            .min_col_width(100.0)
-            .spacing([12.0, 7.0])
+        egui::Grid::new(format!("global_tests_grid_{file_idx}"))
+            .num_columns(5).min_col_width(100.0).spacing([12.0, 7.0])
             .show(ui, |ui| {
                 for h in &["Test", "Statistic", "p-value", "Reject H₀?", "Interpretation"] {
-                    ui.label(
-                        RichText::new(*h).size(11.0).color(pal::MUTED).strong(),
-                    );
+                    ui.label(RichText::new(*h).size(11.0).color(pal::MUTED).strong());
                 }
                 ui.end_row();
-
-                for &(test, stat_str, p, alpha, reject_interp, accept_interp) in rows {
+                for &(test, stat_str, p, alpha, rej, acc) in rows {
                     let reject = p < alpha;
-                    let p_col  = if reject { pal::RED } else { pal::GREEN };
-
+                    let col    = if reject { pal::RED } else { pal::GREEN };
                     ui.label(RichText::new(test).size(12.0));
                     ui.label(RichText::new(stat_str).monospace().size(12.0));
                     ui.label(
-                        RichText::new(if p < 0.0001 {
-                            "< 0.0001".to_owned()
-                        } else {
-                            format!("{:.4}", p)
-                        })
-                        .monospace().size(12.0).color(p_col),
+                        RichText::new(if p < 0.0001 { "< 0.0001".to_owned() } else { format!("{:.4}", p) })
+                            .monospace().size(12.0).color(col),
                     );
-                    ui.label(
-                        RichText::new(if reject { "Yes" } else { "No" })
-                            .size(12.0).color(p_col).strong(),
-                    );
-                    ui.label(
-                        RichText::new(if reject { reject_interp } else { accept_interp })
-                            .size(11.0).color(p_col),
-                    );
+                    ui.label(RichText::new(if reject { "Yes" } else { "No" }).size(12.0).color(col).strong());
+                    ui.label(RichText::new(if reject { rej } else { acc }).size(11.0).color(col));
                     ui.end_row();
                 }
             });
@@ -1118,19 +928,14 @@ fn statistics_tab(
                 "Mean per-window χ² p-value: {:.4}   (≈ 0.5 expected for uniform random data)",
                 s.mean_window_p
             ))
-            .size(11.0)
-            .color(pal::MUTED),
+            .size(11.0).color(pal::MUTED),
         );
     });
 
     ui.add_space(8.0);
 
-    // ── Per-metric aggregate statistics ──────────────────────────────────────
     card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Per-metric Statistics (windowed)")
-                .strong().color(pal::TEXT).size(13.0),
-        );
+        ui.label(RichText::new("Per-metric Statistics (windowed)").strong().color(pal::TEXT).size(13.0));
         ui.add_space(2.0);
         ui.label(
             RichText::new(format!("Window size: {} bytes", result.window_size))
@@ -1138,24 +943,21 @@ fn statistics_tab(
         );
         ui.add_space(8.0);
 
-        let rows: &[(&str, &str, &str, &MetricStats, Option<(f64, f64)>)] = &[
-            ("Entropy",            "bits / symbol", "[0, 8]",          &s.entropy_stats, Some((0.0, 8.0))),
-            ("Chi² statistic",     "statistic",     "df=255, E=255",   &s.chi2_stats,    None),
-            ("Serial correlation", "ρ",             "[-1, 1]",         &s.serial_stats,  Some((-1.0, 1.0))),
-            ("Hamming weight",     "bits / byte",   "[0, 8]",          &s.hamming_stats, Some((0.0, 8.0))),
+        let rows: &[(&str, &str, &str, &MetricStats)] = &[
+            ("Entropy",            "bits / symbol", "[0, 8]",          &s.entropy_stats),
+            ("Chi² statistic",     "dimensionless", "df=255, E=w/256", &s.chi2_stats),
+            ("Serial correlation", "ρ",             "[−1, 1]",         &s.serial_stats),
+            ("Hamming weight",     "bits / byte",   "[0, 8]",          &s.hamming_stats),
         ];
 
         egui::Grid::new("metric_stats_grid")
-            .num_columns(7)
-            .min_col_width(72.0)
-            .spacing([12.0, 7.0])
+            .num_columns(7).min_col_width(72.0).spacing([12.0, 7.0])
             .show(ui, |ui| {
-                for h in &["Metric", "Unit", "Theoretical", "Mean", "Std. Dev.", "Min", "Max"] {
+                for h in &["Metric", "Unit", "Theoretical range", "Mean", "Std dev", "Min", "Max"] {
                     ui.label(RichText::new(*h).size(11.0).color(pal::MUTED).strong());
                 }
                 ui.end_row();
-
-                for &(name, unit, theory, ms, _) in rows {
+                for &(name, unit, theory, ms) in rows {
                     ui.label(RichText::new(name).size(12.0));
                     ui.label(RichText::new(unit).size(11.0).color(pal::MUTED));
                     ui.label(RichText::new(theory).monospace().size(11.0).color(pal::MUTED));
@@ -1170,32 +972,21 @@ fn statistics_tab(
 
     ui.add_space(8.0);
 
-    // ── Quick interpretation guide ────────────────────────────────────────────
     card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Interpretation Guide")
-                .strong().color(pal::TEXT).size(13.0),
-        );
+        ui.label(RichText::new("Interpretation Guide").strong().color(pal::TEXT).size(13.0));
         ui.add_space(6.0);
-
-        let items = [
-            ("Entropy ≈ 8 bits/symbol",
-             "Byte values are near-maximally uncertain — typical of compressed or encrypted data."),
-            ("Entropy ≪ 8 bits/symbol",
-             "Significant redundancy.  Structured, text, or sparse data."),
-            ("Chi² p-value ≪ 0.05",
-             "Byte distribution deviates significantly from uniform.  Likely structured content."),
-            ("Serial correlation |ρ| > 0.1",
-             "Adjacent bytes are correlated — sequential structure or repeated patterns present."),
-            ("Hamming weight ≈ 4.0",
-             "Expected for uniformly random bytes (each bit ≈ 0.5)."),
-            ("KS p-value < 0.05",
-             "Global CDF diverges from uniform — byte usage is skewed or concentrated."),
-            ("Runs test p-value < 0.05",
-             "Runs of bytes above/below the median are non-random — implies local structure."),
+        let items: &[(&str, &str)] = &[
+            ("Entropy ≈ 8 bits/symbol",  "Near-maximal uncertainty — typical of compressed or encrypted data."),
+            ("Entropy ≪ 8 bits/symbol",  "Significant redundancy — structured, sparse, or padding regions."),
+            ("Chi² p-value ≪ 0.05",      "Byte distribution deviates from uniform — likely structured content."),
+            ("Serial |ρ| ≫ 0",           "Adjacent bytes are linearly correlated — sequential structure present."),
+            ("Hamming weight ≈ 4.0",      "Expected for uniform random bytes (bit probability ≈ 0.5)."),
+            ("Hamming weight ≈ 8.0",      "All bits set — consistent with erased flash (0xFF fill)."),
+            ("Hamming weight ≈ 0.0",      "All bits clear — consistent with zero-fill padding."),
+            ("KS p-value < 0.05",         "Global CDF diverges from uniform — byte usage is skewed."),
+            ("Runs test p-value < 0.05",  "Non-random sequential structure — long runs or alternating patterns."),
         ];
-
-        for (term, explanation) in &items {
+        for (term, explanation) in items {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(*term).monospace().size(12.0).color(pal::RED));
                 ui.label(RichText::new("—").size(12.0).color(pal::MUTED));
@@ -1204,82 +995,12 @@ fn statistics_tab(
             ui.add_space(3.0);
         }
     });
-
-    // ── B&W exports for all metrics ───────────────────────────────────────────
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Export All Plots (B&W SVG)")
-                .strong().color(pal::TEXT).size(13.0),
-        );
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            let exports: &[(&str, &str, &[[f64; 2]])] = &[
-                ("Entropy",            "entropy",  &result.entropy),
-                ("Chi²",               "chi2",     &result.chi2),
-                ("Serial Correlation", "serial",   &result.serial_corr),
-                ("Hamming Weight",     "hamming",  &result.hamming),
-                ("Bigram Uniqueness",  "bigram",   &result.bigram_scores),
-                ("Trigram Uniqueness", "trigram",  &result.trigram_scores),
-            ];
-            for &(label, stem, data) in exports {
-                if ui.add(
-                    egui::Button::new(
-                        RichText::new(format!("⬇ {label}")).size(11.0).color(pal::RED),
-                    )
-                    .fill(pal::RED_FAINT)
-                    .stroke(Stroke::new(1.0, pal::RED_MID))
-                    .rounding(Rounding::same(4.0)),
-                ).clicked() {
-                    let svg = svg_line_chart(
-                        data,
-                        &format!("{label} — {file_name}"),
-                        "File offset",
-                        label,
-                        &[],
-                    );
-                    save_svg(svg, &format!("{stem}_{file_index}"));
-                }
-                ui.add_space(4.0);
-            }
-            if ui.add(
-                egui::Button::new(
-                    RichText::new("⬇ Byte Dist").size(11.0).color(pal::RED),
-                )
-                .fill(pal::RED_FAINT)
-                .stroke(Stroke::new(1.0, pal::RED_MID))
-                .rounding(Rounding::same(4.0)),
-            ).clicked() {
-                let svg = svg_bar_chart(
-                    &result.byte_dist,
-                    &format!("Byte Frequency Distribution — {file_name}"),
-                );
-                save_svg(svg, &format!("byte_dist_{file_index}"));
-            }
-            ui.add_space(4.0);
-            if ui.add(
-                egui::Button::new(
-                    RichText::new("⬇ CSV (all metrics)").size(11.0).color(pal::RED),
-                )
-                .fill(pal::RED_FAINT)
-                .stroke(Stroke::new(1.0, pal::RED_MID))
-                .rounding(Rounding::same(4.0)),
-            ).clicked() {
-                export_csv(result, file_name);
-            }
-        });
-    });
 }
 
-/// Hex dump with virtual scrolling, optional auto-scroll, and region highlighting.
-fn hex_view(
-    ui:        &mut egui::Ui,
-    data:      &[u8],
-    scroll_to: Option<usize>,
-    highlight: Option<(usize, usize)>,
-) {
+fn hex_view(ui: &mut egui::Ui, data: &[u8], scroll_to: Option<usize>, highlight: Option<(usize, usize)>) {
     let total_lines = (data.len() + HEX_WIDTH - 1) / HEX_WIDTH;
-    let row_height  = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
+    let row_height  = ui.text_style_height(&egui::TextStyle::Monospace)
+        + ui.spacing().item_spacing.y;
 
     let mut scroll = egui::ScrollArea::vertical()
         .id_source("hex_scroll")
@@ -1287,8 +1008,7 @@ fn hex_view(
 
     if let Some(target_byte) = scroll_to {
         let target_line = target_byte / HEX_WIDTH;
-        let visible_rows = 3usize;
-        let y = (target_line.saturating_sub(visible_rows)) as f32 * row_height;
+        let y = (target_line.saturating_sub(3)) as f32 * row_height;
         scroll = scroll.vertical_scroll_offset(y);
     }
 
@@ -1300,11 +1020,11 @@ fn hex_view(
 
     scroll.show_rows(ui, row_height, total_lines, |ui, row_range| {
         for line in row_range {
-            let line_offset = line * HEX_WIDTH;
-            let slice_end   = (line_offset + HEX_WIDTH).min(data.len());
-            let slice       = &data[line_offset..slice_end];
+            let start = line * HEX_WIDTH;
+            let end   = (start + HEX_WIDTH).min(data.len());
+            let slice = &data[start..end];
 
-            let mut hex   = format!("{:08X}  ", line_offset);
+            let mut hex   = format!("{:08X}  ", start);
             let mut ascii = String::with_capacity(HEX_WIDTH);
             for (i, b) in slice.iter().enumerate() {
                 if i == 8 { hex.push(' '); }
@@ -1317,25 +1037,13 @@ fn hex_view(
                 hex.push_str("   ");
             }
             hex.push_str(&format!(" │ {}", ascii));
-
-            let is_highlighted = hl_range.as_ref().map_or(false, |r| r.contains(&line));
-
-            if is_highlighted {
-                let desired = Vec2::new(ui.available_width(), row_height);
-                let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
-                ui.painter().rect(
-                    rect.expand(1.0),
-                    Rounding::same(2.0),
-                    pal::HL_BG,
-                    Stroke::new(1.0, pal::HL_BORDER),
-                );
-                ui.painter().text(
-                    rect.left_center(),
-                    egui::Align2::LEFT_CENTER,
-                    &hex,
-                    FontId::monospace(12.0),
-                    pal::HL_BORDER,
-                );
+            const HEX_ROW_WIDTH: f32 = 720.0;
+            let highlighted = hl_range.as_ref().map_or(false, |r| r.contains(&line));
+            if highlighted {
+                let desired = Vec2::new(HEX_ROW_WIDTH, row_height);
+                let (rect, _)  = ui.allocate_exact_size(desired, egui::Sense::hover());
+                ui.painter().rect(rect.expand(1.0), Rounding::same(2.0), pal::HL_BG, Stroke::new(1.0, pal::HL_BORDER));
+                ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, &hex, egui::FontId::monospace(12.0), pal::HL_BORDER);
             } else {
                 ui.label(RichText::new(&hex).monospace().size(12.0).color(pal::TEXT));
             }
@@ -1343,12 +1051,8 @@ fn hex_view(
     });
 }
 
-// ── eframe::App ───────────────────────────────────────────────────────────────
-
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-
-        // ── Theme ─────────────────────────────────────────────
         let mut vis = ctx.style().visuals.clone();
         vis.override_text_color              = Some(pal::TEXT);
         vis.panel_fill                       = pal::BG;
@@ -1365,7 +1069,6 @@ impl eframe::App for App {
         vis.selection.stroke                 = Stroke::new(1.0, pal::RED);
         ctx.set_visuals(vis);
 
-        // ── Top bar ───────────────────────────────────────────
         egui::TopBottomPanel::top("topbar")
             .frame(Frame {
                 inner_margin: Margin::symmetric(16.0, 10.0),
@@ -1379,12 +1082,8 @@ impl eframe::App for App {
                     ui.separator();
 
                     if ui.add(
-                        egui::Button::new(
-                            RichText::new("+ Load Binary").size(12.0).color(Color32::WHITE),
-                        )
-                        .fill(pal::RED)
-                        .stroke(Stroke::NONE)
-                        .rounding(Rounding::same(5.0)),
+                        egui::Button::new(RichText::new("+ Load Binary").size(12.0).color(Color32::WHITE))
+                            .fill(pal::RED).stroke(Stroke::NONE).rounding(Rounding::same(5.0)),
                     ).clicked() {
                         if let Some(file) = Self::load_file() {
                             self.files.push(file);
@@ -1392,12 +1091,8 @@ impl eframe::App for App {
                     }
 
                     if ui.add(
-                        egui::Button::new(
-                            RichText::new("▶ Analyze").size(12.0).color(Color32::WHITE),
-                        )
-                        .fill(pal::RED_MID)
-                        .stroke(Stroke::NONE)
-                        .rounding(Rounding::same(5.0)),
+                        egui::Button::new(RichText::new("▶ Analyze").size(12.0).color(Color32::WHITE))
+                            .fill(pal::RED_MID).stroke(Stroke::NONE).rounding(Rounding::same(5.0)),
                     ).clicked() {
                         let (w, k) = (self.window_size, self.anomaly_k);
                         for file in &mut self.files {
@@ -1406,7 +1101,6 @@ impl eframe::App for App {
                     }
 
                     ui.separator();
-
                     ui.label(RichText::new("Window:").size(12.0).color(pal::MUTED));
                     ui.scope(|ui| {
                         let vis = ui.visuals_mut();
@@ -1424,7 +1118,6 @@ impl eframe::App for App {
                     });
 
                     ui.separator();
-
                     ui.label(RichText::new("Sensitivity (σ):").size(12.0).color(pal::MUTED));
                     let k_resp = ui.add(
                         egui::DragValue::new(&mut self.anomaly_k)
@@ -1442,12 +1135,10 @@ impl eframe::App for App {
                     }
 
                     ui.separator();
-
                     let hex_label = if self.show_hex { "✕ Hex" } else { "⟨/⟩ Hex" };
                     if ui.add(
                         egui::Button::new(
-                            RichText::new(hex_label)
-                                .size(12.0)
+                            RichText::new(hex_label).size(12.0)
                                 .color(if self.show_hex { Color32::WHITE } else { pal::RED }),
                         )
                         .fill(if self.show_hex { pal::RED } else { pal::RED_FAINT })
@@ -1465,9 +1156,7 @@ impl eframe::App for App {
                         );
                         if ui.add(
                             egui::Button::new(RichText::new("✕").size(11.0).color(pal::MUTED))
-                                .fill(pal::RED_FAINT)
-                                .stroke(Stroke::NONE)
-                                .rounding(Rounding::same(3.0)),
+                                .fill(pal::RED_FAINT).stroke(Stroke::NONE).rounding(Rounding::same(3.0)),
                         ).on_hover_text("Clear highlight").clicked() {
                             self.hex_highlight = None;
                         }
@@ -1475,7 +1164,6 @@ impl eframe::App for App {
                 });
             });
 
-        // ── Left: file list ───────────────────────────────────
         egui::SidePanel::left("filelist")
             .resizable(true)
             .default_width(180.0)
@@ -1493,67 +1181,52 @@ impl eframe::App for App {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if self.files.is_empty() {
-                            ui.label(
-                                RichText::new("No files loaded.").size(12.0).color(pal::MUTED),
-                            );
+                            ui.label(RichText::new("No files loaded.").size(12.0).color(pal::MUTED));
                         }
                         for (idx, file) in self.files.iter().enumerate() {
                             let selected = idx == self.sel_file;
                             if ui.add(egui::SelectableLabel::new(
-                                selected,
-                                RichText::new(&file.name).size(12.0),
+                                selected, RichText::new(&file.name).size(12.0),
                             )).clicked() {
                                 self.sel_file = idx;
                             }
-
                             if let Some(ref r) = file.result {
-                                let n = r.regions.iter().filter(|r| r.suspicious).count();
-                                // Show randomness summary in sidebar.
-                                let ksp = r.stats.ks_p;
-                                let summary_col = if ksp < 0.05 { pal::RED } else { pal::GREEN };
+                                let n           = r.regions.iter().filter(|r| r.suspicious).count();
+                                let summary_col = if r.stats.ks_p < 0.05 { pal::RED } else { pal::GREEN };
                                 ui.label(
-                                    RichText::new(format!(
-                                        "  KS p={:.3}  χ²p={:.3}",
-                                        ksp, r.stats.global_chi2_p,
-                                    ))
-                                    .size(10.0)
-                                    .color(summary_col),
+                                    RichText::new(format!("  KS p={:.3}  χ²p={:.3}", r.stats.ks_p, r.stats.global_chi2_p))
+                                        .size(10.0).color(summary_col),
                                 );
                                 if n > 0 {
-                                    ui.label(
-                                        RichText::new(format!("  ⚠ {} regions", n))
-                                            .size(10.0).color(pal::RED),
-                                    );
+                                    ui.label(RichText::new(format!("  ⚠ {} regions", n)).size(10.0).color(pal::RED));
                                 }
                             } else {
-                                ui.label(
-                                    RichText::new("  not analyzed").size(10.0).color(pal::MUTED),
-                                );
+                                ui.label(RichText::new("  not analyzed").size(10.0).color(pal::MUTED));
                             }
                         }
                     });
             });
 
-        // ── Right: hex dump ───────────────────────────────────
-        let scroll_target  = if self.hex_do_scroll { self.hex_highlight.map(|(off, _)| off) } else { None };
+        let was_showing_hex = self.show_hex;
+        if self.hex_scroll_pending.is_some() { self.show_hex = true; }
+        let scroll_target  = self.hex_scroll_pending;
         let highlight_copy = self.hex_highlight;
-        if self.hex_do_scroll { self.hex_do_scroll = false; }
 
         if self.show_hex {
             egui::SidePanel::right("hexdump")
                 .resizable(true)
-                .default_width(540.0)
+                .default_width(760.0)
+                .min_width(620.0)
                 .frame(Frame {
-                    inner_margin: Margin::same(12.0),
+                    inner_margin: Margin::same(30.0),
+                    outer_margin: Margin::ZERO,
                     fill:         pal::PANEL,
                     stroke:       Stroke::new(1.0, pal::BORDER),
                     ..Default::default()
                 })
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("HEX DUMP").size(10.0).color(pal::MUTED).strong(),
-                        );
+                        ui.label(RichText::new("HEX DUMP").size(10.0).color(pal::MUTED).strong());
                         if let Some((off, len)) = highlight_copy {
                             ui.add_space(8.0);
                             ui.label(
@@ -1562,39 +1235,31 @@ impl eframe::App for App {
                             );
                         }
                     });
-
                     if let Some(file) = self.files.get(self.sel_file) {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&file.name).size(12.0).strong());
                             ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(format!("{} bytes", file.data.len()))
-                                    .size(11.0).color(pal::MUTED),
-                            );
+                            ui.label(RichText::new(format!("{} bytes", file.data.len())).size(11.0).color(pal::MUTED));
                         });
                         ui.add_space(4.0);
                         ui.separator();
                         ui.add_space(4.0);
                         ui.label(
-                            RichText::new(
-                                "OFFSET    00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  │ ASCII"
-                            )
-                            .monospace().size(11.0).color(pal::MUTED),
+                            RichText::new("OFFSET    00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  │ ASCII")
+                                .monospace().size(11.0).color(pal::MUTED),
                         );
                         ui.add_space(2.0);
                         hex_view(ui, &file.data, scroll_target, highlight_copy);
                     } else {
                         ui.add_space(24.0);
-                        ui.label(
-                            RichText::new("Load a binary file to inspect.")
-                                .color(pal::MUTED).size(12.0),
-                        );
+                        ui.label(RichText::new("Load a binary file to inspect.").color(pal::MUTED).size(12.0));
                     }
                 });
         }
 
-        // ── Central: tabs ─────────────────────────────────────
-        let mut pending_jump: Option<usize> = None;
+        if was_showing_hex {
+            self.hex_scroll_pending = None;
+        }
 
         egui::CentralPanel::default()
             .frame(Frame {
@@ -1608,8 +1273,7 @@ impl eframe::App for App {
                         let active = self.active_tab == i;
                         if ui.add(
                             egui::Button::new(
-                                RichText::new(*tab)
-                                    .size(12.0)
+                                RichText::new(*tab).size(12.0)
                                     .color(if active { pal::RED } else { pal::MUTED })
                                     .strong(),
                             )
@@ -1625,10 +1289,7 @@ impl eframe::App for App {
 
                 if self.files.is_empty() {
                     ui.centered_and_justified(|ui| {
-                        ui.label(
-                            RichText::new("Load a binary and click ▶ Analyze")
-                                .size(16.0).color(pal::MUTED),
-                        );
+                        ui.label(RichText::new("Load a binary and click ▶ Analyze").size(16.0).color(pal::MUTED));
                     });
                     return;
                 }
@@ -1639,107 +1300,157 @@ impl eframe::App for App {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
 
-                        // Metric reorder row (Metrics tab only).
                         if self.active_tab == 0 {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    RichText::new("Plot order:").size(11.0).color(pal::MUTED),
-                                );
-                                let n = self.metric_order.len();
-                                let mut swap: Option<(usize, usize)> = None;
-                                for i in 0..n {
-                                    let label = self.metric_order[i].label;
-                                    ui.add_space(2.0);
-                                    card_frame().inner_margin(Margin::same(4.0)).show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(
-                                                RichText::new(label).size(11.0).color(pal::TEXT),
-                                            );
-                                            if i > 0 && ui.add(
-                                                egui::Button::new(
-                                                    RichText::new("◀").size(10.0).color(pal::RED),
-                                                )
-                                                .fill(pal::RED_FAINT)
-                                                .stroke(Stroke::NONE)
-                                                .rounding(Rounding::same(3.0))
-                                                .min_size(Vec2::new(18.0, 16.0)),
-                                            ).on_hover_text("Move left").clicked() {
-                                                swap = Some((i - 1, i));
-                                            }
-                                            if i + 1 < n && ui.add(
-                                                egui::Button::new(
-                                                    RichText::new("▶").size(10.0).color(pal::RED),
-                                                )
-                                                .fill(pal::RED_FAINT)
-                                                .stroke(Stroke::NONE)
-                                                .rounding(Rounding::same(3.0))
-                                                .min_size(Vec2::new(18.0, 16.0)),
-                                            ).on_hover_text("Move right").clicked() {
-                                                swap = Some((i, i + 1));
-                                            }
-                                        });
-                                    });
+                            let analyzed: Vec<(usize, String, AnalysisResult)> = (0..self.files.len())
+                                .filter_map(|idx| {
+                                    let result = self.files[idx].result.clone()?;
+                                    Some((idx, self.files[idx].name.clone(), result))
+                                })
+                                .collect();
+
+                            if analyzed.is_empty() {
+                                ui.centered_and_justified(|ui| {
+                                    ui.label(RichText::new("Load a binary and click ▶ Analyze").size(16.0).color(pal::MUTED));
+                                });
+                            } else {
+                                let n      = analyzed.len() as f32;
+                                let avail  = ui.available_width();
+                                let col_w  = ((avail - (n - 1.0) * 16.0) / n).max(180.0);
+                                let k      = self.anomaly_k;
+
+                                macro_rules! apply_jump {
+                                    ($jump:expr) => {
+                                        if let Some((fidx, off)) = $jump {
+                                            let ws = analyzed.iter()
+                                                .find(|(i, _, _)| *i == fidx)
+                                                .map(|(_, _, r)| r.window_size.max(1))
+                                                .unwrap_or(1);
+                                            self.sel_file           = fidx;
+                                            self.hex_scroll_pending = Some(off);
+                                            self.hex_highlight      = Some((off, ws));
+                                        }
+                                    };
                                 }
-                                if let Some((a, b)) = swap {
-                                    self.metric_order.swap(a, b);
-                                }
-                            });
-                            ui.add_space(8.0);
-                        }
 
-                        let anomaly_k = self.anomaly_k;
-
-                        for idx in 0..self.files.len() {
-                            let file_name = self.files[idx].name.clone();
-                            let result    = self.files[idx].result.clone();
-                            let Some(result) = result else { continue };
-
-                            egui::CollapsingHeader::new(
-                                RichText::new(&file_name).size(13.0).strong(),
-                            )
-                            .default_open(true)
-                            .show(ui, |ui| {
+                                let jump = {
+                                    let entries: Vec<(&[[f64; 2]], Option<(f64, f64, f64)>, usize, &str)> =
+                                        analyzed.iter().map(|(idx, name, res)| {
+                                            let t = &res.thresholds;
+                                            (res.entropy.as_slice(), Some((t.entropy_mean, t.entropy_sd, k)), *idx, name.as_str())
+                                        }).collect();
+                                    plot_metrics_row(ui, "Entropy", "bits / symbol", &entries, col_w, 0)
+                                };
+                                apply_jump!(jump);
                                 ui.add_space(4.0);
-                                match self.active_tab {
-                                    0 => {
-                                        let order = self.metric_order.clone();
-                                        for (si, slot) in order.iter().enumerate() {
-                                            let data     = metric_data(slot, &result);
-                                            let stat_ref = metric_mean_sd(slot, &result)
-                                                .map(|(m, s)| (m, s, anomaly_k));
-                                            plot_metric(
-                                                ui, slot.label, slot.unit,
-                                                data, idx, si, slot.norm,
-                                                stat_ref,
-                                            );
-                                            ui.add_space(4.0);
+
+                                let jump = {
+                                    let entries: Vec<(&[[f64; 2]], Option<(f64, f64, f64)>, usize, &str)> =
+                                        analyzed.iter().map(|(idx, name, res)| {
+                                            let t = &res.thresholds;
+                                            (res.chi2.as_slice(), Some((t.chi2_mean, t.chi2_sd, k)), *idx, name.as_str())
+                                        }).collect();
+                                    plot_metrics_row(ui, "Chi²", "statistic", &entries, col_w, 1)
+                                };
+                                apply_jump!(jump);
+                                ui.add_space(4.0);
+
+                                let jump = {
+                                    let entries: Vec<(&[[f64; 2]], Option<(f64, f64, f64)>, usize, &str)> =
+                                        analyzed.iter().map(|(idx, name, res)| {
+                                            let t = &res.thresholds;
+                                            (res.serial_corr.as_slice(), Some((t.serial_mean, t.serial_sd, k)), *idx, name.as_str())
+                                        }).collect();
+                                    plot_metrics_row(ui, "Serial Correlation", "ρ", &entries, col_w, 2)
+                                };
+                                apply_jump!(jump);
+                                ui.add_space(4.0);
+
+                                let jump = {
+                                    let entries: Vec<(&[[f64; 2]], Option<(f64, f64, f64)>, usize, &str)> =
+                                        analyzed.iter().map(|(idx, name, res)| {
+                                            (res.hamming.as_slice(), None, *idx, name.as_str())
+                                        }).collect();
+                                    plot_metrics_row(ui, "Hamming Weight", "bits / byte", &entries, col_w, 3)
+                                };
+                                apply_jump!(jump);
+                                ui.add_space(4.0);
+
+                                let jump = {
+                                    let entries: Vec<(&[[f64; 2]], Option<(f64, f64, f64)>, usize, &str)> =
+                                        analyzed.iter().map(|(idx, name, res)| {
+                                            (res.bigram_scores.as_slice(), None, *idx, name.as_str())
+                                        }).collect();
+                                    plot_metrics_row(ui, "Bigram Uniqueness", "ratio", &entries, col_w, 4)
+                                };
+                                apply_jump!(jump);
+                                ui.add_space(4.0);
+
+                                let jump = {
+                                    let entries: Vec<(&[[f64; 2]], Option<(f64, f64, f64)>, usize, &str)> =
+                                        analyzed.iter().map(|(idx, name, res)| {
+                                            (res.trigram_scores.as_slice(), None, *idx, name.as_str())
+                                        }).collect();
+                                    plot_metrics_row(ui, "Trigram Uniqueness", "ratio", &entries, col_w, 5)
+                                };
+                                apply_jump!(jump);
+                            }
+
+                        } else if self.active_tab == 1 {
+                            let analyzed: Vec<(usize, String, AnalysisResult)> = (0..self.files.len())
+                                .filter_map(|idx| {
+                                    let result = self.files[idx].result.clone()?;
+                                    Some((idx, self.files[idx].name.clone(), result))
+                                })
+                                .collect();
+                            if analyzed.is_empty() {
+                                ui.centered_and_justified(|ui| {
+                                    ui.label(RichText::new("Load a binary and click ▶ Analyze").size(16.0).color(pal::MUTED));
+                                });
+                            } else {
+                                let n      = analyzed.len() as f32;
+                                let avail  = ui.available_width();
+                                let item_w = ((avail - (n - 1.0) * 8.0) / n).max(200.0);
+                                ui.horizontal_top(|ui| {
+                                    for (idx, file_name, result) in &analyzed {
+                                        ui.vertical(|ui| {
+                                            ui.set_max_width(item_w);
+                                            plot_distribution(ui, result, file_name, *idx);
+                                        });
+                                        ui.add_space(8.0);
+                                    }
+                                });
+                            }
+                        } else {
+                            for idx in 0..self.files.len() {
+                                let file_name = self.files[idx].name.clone();
+                                let result    = self.files[idx].result.clone();
+                                let Some(result) = result else { continue };
+
+                                egui::CollapsingHeader::new(
+                                    RichText::new(&file_name).size(13.0).strong(),
+                                )
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    ui.add_space(4.0);
+                                    match self.active_tab {
+                                        2 => {
+                                            if let Some(off) = suspicious_regions(ui, &result, &file_name, idx) {
+                                                let ws = result.window_size.max(1);
+                                                self.hex_highlight      = Some((off, ws));
+                                                self.hex_scroll_pending = Some(off);
+                                            }
                                         }
-                                    }
-                                    1 => {
-                                        plot_distribution(ui, &result, &file_name, idx);
-                                    }
-                                    2 => {
-                                        if let Some(off) = suspicious_regions(ui, &result) {
-                                            pending_jump = Some(off);
-                                            let ws = result.window_size.max(1);
-                                            self.hex_highlight = Some((off, ws));
-                                            self.hex_do_scroll = true;
+                                        3 => {
+                                            statistics_tab(ui, &result, &file_name, idx);
                                         }
+                                        _ => {}
                                     }
-                                    3 => {
-                                        statistics_tab(ui, &result, &file_name, idx);
-                                    }
-                                    _ => {}
-                                }
-                            });
-                            ui.add_space(8.0);
+                                });
+                                ui.add_space(8.0);
+                            }
                         }
                     });
             });
-
-        if pending_jump.is_some() {
-            self.show_hex = true;
-        }
     }
 }
 
