@@ -1,15 +1,16 @@
 [package]
 name    = "eliciunt"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[[bin]]
+name = "eliciunt"
+path = "src/main.rs"
 
 [dependencies]
-eframe    = "0.27"
-egui      = "0.27"
-egui_plot = "0.27"
-rfd       = "0.14"
-plotters = "0.3.7"
-png = "0.18.1"
-
-[profile.release]
-opt-level = 3
+eframe     = "0.27"
+egui       = "0.27"
+egui_plot  = "0.27"
+plotters   = "0.3"
+png        = "0.17"
+rfd        = "0.14"
