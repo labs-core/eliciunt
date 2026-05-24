@@ -1,9 +1,9 @@
 use eframe::egui;
 use egui::{Color32, Margin, RichText, Rounding, Stroke, Vec2};
-use egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoints, VLine};
+use egui_plot::{Bar, BarChart, HLine, Line, Plot, PlotPoint, PlotPoints, Text, VLine};
 
 use crate::constants::{BYTE_RANGE, PLOT_HEIGHT_PX, UNIFORM_SPIKE_RATIO};
-use crate::export::{export_bar_chart_png, export_line_chart_png, save_png_via_dialog};
+use crate::export::{export_bar_chart_png, export_line_chart_png, save_png_via_dialog, ExportBookmark};
 use crate::models::{AnalysisResult, HexBookmark};
 use crate::palette as pal;
 use crate::ui::widgets::{card_frame, png_export_button, truncate_filename};
@@ -56,60 +56,107 @@ pub fn render_metric_plot(
         })
         .show(ui, |plot_ui| {
             // ── bookmark background bands ─────────────────────────────────
-            // egui_plot doesn't have a native filled-rect primitive, so we
-            // approximate a band with a pair of VLines plus a transparent
-            // polygon drawn via the custom painting callback trick: we store
-            // the screen transform and paint afterwards.  The simplest approach
-            // that works with egui_plot 0.27-style API is to draw two
-            // VLines with a thick alpha-blended stroke.  For a true filled
-            // rect we need to use `plot_ui.ctx()` + `painter` after the show
-            // closure; the approach below uses semi-transparent vertical lines
-            // spaced 1 px apart in plot-space to fill the band.
-            //
-            // For a pixel-perfect fill we instead take the approach of drawing
-            // an opaque `Polygon` using `plot_ui.polygon()` which is stable in
-            // egui_plot >= 0.26.
+            // Visual hierarchy goals:
+            //   1. Main fill     – broad translucent region the eye can spot
+            //                      at a glance without obscuring the data line.
+            //   2. Edge accents  – narrow inner strips pressed against each
+            //                      border wall; the higher-alpha "shadow" gives
+            //                      the region a sense of depth and makes the
+            //                      boundary crisp even when the region is thin.
+            //   3. Solid borders – 2 px solid VLines read as hard walls rather
+            //                      than the dashed "guide-line" look.
+            //   4. Floating label – Text pinned at the data ceiling so the
+            //                      bookmark name is always readable without
+            //                      covering the line chart itself.
 
             for (x0, x1, color, label) in &bm_snapshot {
-                // Filled polygon spanning the full y-axis visible range.
-                // We use a very tall rect so it always covers the plot area
-                // regardless of zoom.
-                let fill_color = Color32::from_rgba_unmultiplied(
-                    color.r(), color.g(), color.b(), 35,
-                );
-                let border_color = Color32::from_rgba_unmultiplied(
-                    color.r(), color.g(), color.b(), 160,
-                );
+                let r = color.r();
+                let g = color.g();
+                let b = color.b();
 
-                // Four corners at an extreme y range.
+                // ── colours at three opacity levels ──────────────────────
+                // Fill: light enough to see through, heavy enough to notice.
+                let fill        = Color32::from_rgba_unmultiplied(r, g, b, 50);
+                // Accent: inner edge strips – noticeably denser than the fill.
+                let accent      = Color32::from_rgba_unmultiplied(r, g, b, 90);
+                // Border: solid VLine walls – nearly opaque for hard edges.
+                let border      = Color32::from_rgba_unmultiplied(r, g, b, 230);
+
                 let y_lo = -1e15_f64;
                 let y_hi =  1e15_f64;
-                let polygon = egui_plot::Polygon::new(PlotPoints::from(vec![
-                    [*x0, y_lo],
-                    [*x1, y_lo],
-                    [*x1, y_hi],
-                    [*x0, y_hi],
-                ]))
-                .fill_color(fill_color)
-                .stroke(Stroke::new(0.0, Color32::TRANSPARENT))
-                .name(label.as_str());
-                plot_ui.polygon(polygon);
 
-                // Left and right border VLines.
+                // ── 1. Main fill polygon ──────────────────────────────────
+                plot_ui.polygon(
+                    egui_plot::Polygon::new(PlotPoints::from(vec![
+                        [*x0, y_lo], [*x1, y_lo], [*x1, y_hi], [*x0, y_hi],
+                    ]))
+                    .fill_color(fill)
+                    .stroke(Stroke::new(0.0, Color32::TRANSPARENT))
+                    // Only this primitive carries the legend name so the label
+                    // appears exactly once in the legend, not once per VLine.
+                    .name(label.as_str()),
+                );
+
+                // ── 2. Inner edge accent strips ───────────────────────────
+                // Width is ~4 % of the bookmark span, clamped so it never
+                // exceeds 1/4 of the span (important for narrow bookmarks).
+                let span        = (x1 - x0).abs();
+                let strip_w     = (span * 0.04).min(span * 0.25).max(1.0);
+
+                plot_ui.polygon(
+                    egui_plot::Polygon::new(PlotPoints::from(vec![
+                        [*x0,           y_lo], [x0 + strip_w, y_lo],
+                        [x0 + strip_w,  y_hi], [*x0,           y_hi],
+                    ]))
+                    .fill_color(accent)
+                    .stroke(Stroke::new(0.0, Color32::TRANSPARENT))
+                    .name(""),
+                );
+                plot_ui.polygon(
+                    egui_plot::Polygon::new(PlotPoints::from(vec![
+                        [x1 - strip_w,  y_lo], [*x1,           y_lo],
+                        [*x1,           y_hi], [x1 - strip_w,  y_hi],
+                    ]))
+                    .fill_color(accent)
+                    .stroke(Stroke::new(0.0, Color32::TRANSPARENT))
+                    .name(""),
+                );
+
+                // ── 3. Solid border VLines ────────────────────────────────
+                // Solid (no dash) + 2 px width reads as a hard region wall
+                // rather than a data guide-line.  No legend name: the polygon
+                // already registered the label above.
                 plot_ui.vline(
                     VLine::new(*x0)
-                        .color(border_color)
-                        .width(1.2)
-                        .style(egui_plot::LineStyle::Dashed { length: 6.0 })
-                        .name(label.as_str()),
+                        .color(border)
+                        .width(2.0)
+                        .name(""),
                 );
                 plot_ui.vline(
                     VLine::new(*x1)
-                        .color(border_color)
-                        .width(1.2)
-                        .style(egui_plot::LineStyle::Dashed { length: 6.0 })
+                        .color(border)
+                        .width(2.0)
                         .name(""),
                 );
+
+                // ── 4. Floating in-plot label ─────────────────────────────
+                // Positioned at the data-space ceiling so it sits just below
+                // the top axis edge and never overlaps the line chart itself.
+                // Uses CENTER_TOP anchor so it is centred in the region and
+                // drops downward from the ceiling.
+                if !label.is_empty() {
+                    let mid_x = (x0 + x1) / 2.0;
+                    plot_ui.text(
+                        Text::new(
+                            PlotPoint::new(mid_x, y_bound_hi),
+                            egui::RichText::new(label.as_str())
+                                .size(10.0)
+                                .strong()
+                                .color(*color),
+                        )
+                        .anchor(egui::Align2::CENTER_TOP),
+                    );
+                }
             }
 
             // ── main metric line ──────────────────────────────────────────
@@ -255,12 +302,25 @@ pub fn render_metric_row(
                         ui.horizontal(|ui| {
                             if png_export_button(ui) {
                                 let y_label = format!("{metric_name} ({metric_unit})");
+                                let export_bookmarks: Vec<ExportBookmark> = bookmarks
+                                    .iter()
+                                    .map(|bm| {
+                                        let (x0, x1) = bm.plot_x_range();
+                                        ExportBookmark {
+                                            x0,
+                                            x1,
+                                            color: (bm.color.r(), bm.color.g(), bm.color.b()),
+                                            label: bm.label.clone(),
+                                        }
+                                    })
+                                    .collect();
                                 match export_line_chart_png(
                                     series,
                                     metric_name,
                                     "File offset (bytes)",
                                     &y_label,
                                     *anomaly_band,
+                                    &export_bookmarks,
                                 ) {
                                     Ok(png) => save_png_via_dialog(
                                         png,

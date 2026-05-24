@@ -35,12 +35,25 @@ const C_UNIFORM:    RGBColor = RGBColor(20,  20,  20);
 const C_BG:         RGBColor = RGBColor(252, 252, 253);
 const C_GRID:       RGBColor = RGBColor(220, 222, 228);
 
+/// A bookmark region to overlay on an exported PNG chart.
+///
+/// `x0` and `x1` are data-space x coordinates (e.g. byte offsets).
+/// `color` is an `(R, G, B)` triple matching the bookmark's `egui::Color32`.
+/// `label` is the text shown inside the region.
+pub struct ExportBookmark {
+    pub x0:    f64,
+    pub x1:    f64,
+    pub color: (u8, u8, u8),
+    pub label: String,
+}
+
 pub fn export_line_chart_png(
     series:       &[[f64; 2]],
     title:        &str,
     x_axis_label: &str,
     y_axis_label: &str,
     anomaly_band: Option<(f64, f64, f64)>,
+    bookmarks:    &[ExportBookmark],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let w = PNG_CHART_WIDTH;
     let h = PNG_CHART_HEIGHT;
@@ -113,6 +126,74 @@ pub fn export_line_chart_png(
                 vec![(x_min, mean), (x_max, mean)],
                 ShapeStyle::from(&C_MEAN).stroke_width(1),
             )))?;
+        }
+
+        // ── bookmark regions ──────────────────────────────────────────────────
+        // Rendering order mirrors plots.rs:
+        //   1. Translucent fill rectangle
+        //   2. Denser inner accent strips at each edge
+        //   3. Solid 2-px border lines
+        //   4. Floating label centred at the top of the region
+        for bm in bookmarks {
+            let (r, g, b) = bm.color;
+            // Clamp bookmark x-range to the chart's x extent so we never draw
+            // outside the plot area.
+            let bx0 = bm.x0.max(x_min);
+            let bx1 = bm.x1.min(x_max);
+            if bx0 >= bx1 { continue; }
+
+            // 1. Main fill – light alpha so the data line shows through.
+            let fill = RGBAColor(r, g, b, 0.20);
+            chart.draw_series(std::iter::once(
+                Rectangle::new(
+                    [(bx0, y_lo), (bx1, y_hi)],
+                    ShapeStyle { color: fill, filled: true, stroke_width: 0 },
+                ),
+            ))?;
+
+            // 2. Inner accent strips – ~4 % of span, clamped to ≤ 25 % of span.
+            let span    = (bx1 - bx0).abs();
+            let strip_w = (span * 0.04).min(span * 0.25).max(1.0);
+            let accent  = RGBAColor(r, g, b, 0.40);
+            for (left, right) in [
+                (bx0,           bx0 + strip_w),
+                (bx1 - strip_w, bx1),
+            ] {
+                chart.draw_series(std::iter::once(
+                    Rectangle::new(
+                        [(left, y_lo), (right, y_hi)],
+                        ShapeStyle { color: accent, filled: true, stroke_width: 0 },
+                    ),
+                ))?;
+            }
+
+            // 3. Solid border lines at each edge.
+            let border = RGBColor(r, g, b);
+            for &edge_x in &[bx0, bx1] {
+                chart.draw_series(std::iter::once(PathElement::new(
+                    vec![(edge_x, y_lo), (edge_x, y_hi)],
+                    ShapeStyle::from(&border).stroke_width(2),
+                )))?;
+            }
+
+            // 4. Floating label – centred horizontally, placed at the top of
+            //    the chart area so it never overlaps the data line.
+            if !bm.label.is_empty() {
+                let mid_x    = (bx0 + bx1) / 2.0;
+                // Position the label at 97 % of y_hi so it sits just below the
+                // top edge, leaving a small gap from the chart frame.
+                let label_y  = y_lo + (y_hi - y_lo) * 0.97;
+                let text_col = RGBColor(r, g, b);
+                chart.draw_series(std::iter::once(
+                    Text::new(
+                        bm.label.clone(),
+                        (mid_x, label_y),
+                        ("sans-serif", 11)
+                            .into_font()
+                            .color(&text_col),
+                    ),
+                ))?;
+            }
         }
 
         let area_fill = RGBAColor(C_FILL.0, C_FILL.1, C_FILL.2, 0.15);
