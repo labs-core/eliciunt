@@ -22,6 +22,7 @@ mod metrics;
 mod models;
 mod palette;
 mod ui;
+mod padding;
 
 use app::App;
 
