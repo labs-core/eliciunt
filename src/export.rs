@@ -48,16 +48,17 @@ const DPI_300_PPM: u32 = 11_811;
 // ── Colour palette ────────────────────────────────────────────────────────────
 // Chosen for distinguishability in greyscale print (IEEE double-column figures
 // are often printed black-and-white by readers).
-const C_LINE:       RGBColor = RGBColor(210,  40,  40);   // strong blue line
-const C_FILL:       RGBColor = RGBColor( 80, 120, 200);   // muted blue area fill
+const C_LINE:       RGBColor = RGBColor( 31,  73, 125);   // deep steel-blue line
+const C_FILL:       RGBColor = RGBColor( 70, 130, 180);   // steel-blue area fill
 const C_MEAN:       RGBColor = RGBColor( 20,  20,  20);   // near-black mean
 const C_BAND_EDGE:  RGBColor = RGBColor(200,  60,  30);   // red band edge
 const C_ANOMALY:    RGBColor = RGBColor(200,  60,  30);   // red anomaly tint
-const C_BAR_NORMAL: RGBColor = RGBColor( 70, 110, 190);   // bar – normal
-const C_BAR_SPIKE:  RGBColor = RGBColor(190,  45,  25);   // bar – spike
-const C_UNIFORM:    RGBColor = RGBColor( 20,  20,  20);   // uniform reference
+const C_BAR_NORMAL: RGBColor = RGBColor( 55, 100, 170);   // bar – normal
+const C_BAR_SPIKE:  RGBColor = RGBColor(180,  35,  20);   // bar – spike
+const C_UNIFORM:    RGBColor = RGBColor( 30,  30,  30);   // uniform reference
 const C_BG:         RGBColor = RGBColor(255, 255, 255);   // white background
-const C_GRID:       RGBColor = RGBColor(190, 192, 200);   // grid bold lines
+const C_GRID:       RGBColor = RGBColor(210, 212, 218);   // grid lines
+const C_AXIS:       RGBColor = RGBColor( 50,  52,  60);   // axis spines / ticks
 
 /// A bookmark region to overlay on an exported PNG chart.
 ///
@@ -105,88 +106,52 @@ pub fn export_line_chart_png(
         let (y_lo, y_hi) = if let Some((mean, sd, k)) = anomaly_band {
             let lo  = y_min.min(mean - k * sd - 0.05 * (y_max - y_min).max(1e-9));
             let hi  = y_max.max(mean + k * sd + 0.05 * (y_max - y_min).max(1e-9));
-            let pad = (hi - lo).max(1e-9) * 0.12;
+            let pad = (hi - lo).max(1e-9) * 0.10;
             (lo - pad, hi + pad)
         } else {
-            let pad = (y_max - y_min).max(1e-9) * 0.14;
-            (y_min - pad, y_max + pad)
+            // Extra top padding reserves visual room for the in-plot legend box.
+            let pad = (y_max - y_min).max(1e-9) * 0.18;
+            (y_min - pad * 0.5, y_max + pad)
         };
 
         // ── font sizes scaled to 3200-wide canvas ─────────────────────────
-        // At 300 DPI and a 88-mm column the canvas is reduced ~11×, so a
-        // 22-pt caption becomes ~2 pt on paper — that's still readable.
-        // Using proportional ("sans-serif") font throughout for clean print.
-        let font_caption = ("sans-serif", 52).into_font().style(FontStyle::Bold);
-        let font_axis    = ("sans-serif", 38).into_font();
-        let font_tick    = ("sans-serif", 32).into_font();
+        let font_caption = ("sans-serif", 56).into_font().style(FontStyle::Bold);
+        let font_axis    = ("sans-serif", 40).into_font().style(FontStyle::Bold);
+        let font_tick    = ("sans-serif", 34).into_font();
 
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, font_caption)
-            .margin_top(60)
-            .margin_bottom(60)
-            .margin_left(60)
-            .margin_right(520)          // reserved for the side legend panel
-            .x_label_area_size(130)
-            .y_label_area_size(200)
+            .caption(title, font_caption.color(&RGBColor(20, 20, 20)))
+            .margin(80)
+            .x_label_area_size(150)
+            .y_label_area_size(220)
             .build_cartesian_2d(x_min..x_max, y_lo..y_hi)?;
 
+        // ── Tufte-style mesh: horizontal reference lines only ─────────────
         chart.configure_mesh()
             .x_desc(x_axis_label)
             .y_desc(y_axis_label)
-            .x_labels(10)
-            .y_labels(8)
+            .x_labels(12)
+            .y_labels(10)
             .x_label_formatter(&|v| format!("0x{:X}", *v as usize))
             .y_label_formatter(&|v| format!("{:.3}", v))
-            // Axis spine: dark, 2 px
-            .axis_style(ShapeStyle::from(&RGBColor(80, 82, 90)).stroke_width(2))
-            // Bold grid lines only — no light sub-grid (reduces visual noise
-            // that is especially distracting in print).
+            .axis_style(ShapeStyle::from(&C_AXIS).stroke_width(3))
             .bold_line_style(ShapeStyle::from(&C_GRID).stroke_width(1))
             .light_line_style(ShapeStyle::from(&RGBAColor(0, 0, 0, 0.0)).stroke_width(0))
-            .x_label_style(font_tick.clone())
-            .y_label_style(font_tick.clone())
-            .axis_desc_style(font_axis.clone())
+            .x_label_style(font_tick.clone().color(&RGBColor(40, 40, 40)))
+            .y_label_style(font_tick.clone().color(&RGBColor(40, 40, 40)))
+            .axis_desc_style(font_axis.clone().color(&RGBColor(20, 20, 20)))
             .draw()?;
 
-        // ── anomaly band ──────────────────────────────────────────────────
-        if let Some((mean, sd, k)) = anomaly_band {
-            let lo_band = mean - k * sd;
-            let hi_band = mean + k * sd;
-
-            // Translucent fill — light enough not to obscure the data line.
-            let band_fill = RGBAColor(C_ANOMALY.0, C_ANOMALY.1, C_ANOMALY.2, 0.07);
-            chart.draw_series(std::iter::once(
-                Rectangle::new(
-                    [(x_min, lo_band), (x_max, hi_band)],
-                    ShapeStyle { color: band_fill, filled: true, stroke_width: 0 },
-                ),
-            ))?;
-
-            // Solid band-edge lines.
-            for &edge_y in &[lo_band, hi_band] {
-                chart.draw_series(std::iter::once(PathElement::new(
-                    vec![(x_min, edge_y), (x_max, edge_y)],
-                    ShapeStyle::from(&C_BAND_EDGE).stroke_width(2),
-                )))?;
-            }
-
-            // Mean reference line.
-            chart.draw_series(std::iter::once(PathElement::new(
-                vec![(x_min, mean), (x_max, mean)],
-                ShapeStyle::from(&C_MEAN).stroke_width(2),
-            )))?;
-        }
-
         // ── bookmark regions ──────────────────────────────────────────────
-        // Rendering order: fill → accent strips → border lines → label.
+        // Clean translucent fill + solid left/right borders only.
+        // No accent strips; labels go into the in-plot legend box below.
         for bm in bookmarks {
             let (r, g, b) = bm.color;
             let bx0 = bm.x0.max(x_min);
             let bx1 = bm.x1.min(x_max);
             if bx0 >= bx1 { continue; }
 
-            // 1. Main fill.
-            let fill = RGBAColor(r, g, b, 0.18);
+            let fill = RGBAColor(r, g, b, 0.13);
             chart.draw_series(std::iter::once(
                 Rectangle::new(
                     [(bx0, y_lo), (bx1, y_hi)],
@@ -194,56 +159,31 @@ pub fn export_line_chart_png(
                 ),
             ))?;
 
-            // 2. Inner accent strips (~4 % of span).
-            let span    = (bx1 - bx0).abs();
-            let strip_w = (span * 0.04).min(span * 0.25).max(1.0);
-            let accent  = RGBAColor(r, g, b, 0.38);
-            for (left, right) in [(bx0, bx0 + strip_w), (bx1 - strip_w, bx1)] {
-                chart.draw_series(std::iter::once(
-                    Rectangle::new(
-                        [(left, y_lo), (right, y_hi)],
-                        ShapeStyle { color: accent, filled: true, stroke_width: 0 },
-                    ),
-                ))?;
-            }
-
-            // 3. Solid 2-px border lines.
             let border = RGBColor(r, g, b);
             for &edge_x in &[bx0, bx1] {
                 chart.draw_series(std::iter::once(PathElement::new(
                     vec![(edge_x, y_lo), (edge_x, y_hi)],
-                    ShapeStyle::from(&border).stroke_width(3),
+                    ShapeStyle::from(&border).stroke_width(2),
                 )))?;
             }
-
-            // 4. Label moved to side legend — not drawn inside the chart.
         }
 
         // ── downsample for dense series ───────────────────────────────────
-        // When the window size is small the series can have hundreds of
-        // thousands of points.  Plotters cannot handle that many segments
-        // reliably at any canvas size — rendering breaks down visually.
-        //
-        // Fix: split the series into consecutive index-based chunks (NOT
-        // x-value buckets).  Because the input series is already sorted by
-        // byte offset, every chunk covers a contiguous x range.  Within each
-        // chunk we keep the min-y and max-y samples *in their original index
-        // order*, so the emitted x values never go backwards.  This preserves
-        // all spikes and troughs faithfully while capping the rendered point
-        // count to ~2× the canvas pixel width.
-        let target_pts  = (PUB_W as usize) * 2;      // 6400 for a 3200-px canvas
+        // Min-max envelope: preserves spikes while capping segments to
+        // ~2× canvas pixel width.
+        let target_pts = (PUB_W as usize) * 2;
         let display_series: Vec<[f64; 2]> = if series.len() > target_pts {
             let chunk_size = (series.len() + target_pts - 1) / (target_pts / 2);
             let mut out = Vec::with_capacity(target_pts);
             for chunk in series.chunks(chunk_size) {
-                // Find min and max by y-value within this chunk.
                 let (min_i, _) = chunk.iter().enumerate()
-                    .min_by(|(_, a), (_, b)| a[1].partial_cmp(&b[1]).unwrap_or(std::cmp::Ordering::Equal))
+                    .min_by(|(_, a), (_, b)| a[1].partial_cmp(&b[1])
+                        .unwrap_or(std::cmp::Ordering::Equal))
                     .unwrap();
                 let (max_i, _) = chunk.iter().enumerate()
-                    .max_by(|(_, a), (_, b)| a[1].partial_cmp(&b[1]).unwrap_or(std::cmp::Ordering::Equal))
+                    .max_by(|(_, a), (_, b)| a[1].partial_cmp(&b[1])
+                        .unwrap_or(std::cmp::Ordering::Equal))
                     .unwrap();
-                // Emit in original index order so x stays monotonically increasing.
                 if min_i <= max_i {
                     out.push(chunk[min_i]);
                     out.push(chunk[max_i]);
@@ -258,10 +198,7 @@ pub fn export_line_chart_png(
         };
 
         // ── area fill under the data line ─────────────────────────────────
-        // AreaSeries is used instead of Polygon::new because it never
-        // self-intersects: it goes forward along the data then straight back
-        // along the baseline, regardless of how the data oscillates.
-        let area_fill     = RGBAColor(C_FILL.0, C_FILL.1, C_FILL.2, 0.12);
+        let area_fill     = RGBAColor(C_FILL.0, C_FILL.1, C_FILL.2, 0.10);
         let area_baseline = y_lo.max(0.0);
         chart.draw_series(AreaSeries::new(
             display_series.iter().map(|p| (p[0], p[1])),
@@ -272,95 +209,185 @@ pub fn export_line_chart_png(
         // ── data line ─────────────────────────────────────────────────────
         chart.draw_series(LineSeries::new(
             display_series.iter().map(|p| (p[0], p[1])),
-            ShapeStyle::from(&C_LINE).stroke_width(3),
+            ShapeStyle::from(&C_LINE).stroke_width(4),
         ))?;
 
-        // ── side legend panel ─────────────────────────────────────────────
-        // Collect unique (label, color) entries — skip entries whose label is
-        // empty (sub-regions of a multi-range group beyond the first) and
-        // deduplicate by label so each group appears once.
+        // ── anomaly band overlays — drawn on top of data ──────────────────
+        // No translucent fill.  Only the dashed ±k·σ threshold lines and the
+        // solid mean reference line are drawn, with inline right-edge labels.
+        //
+        // Dashes are emulated via alternating PathElement segments because
+        // Plotters has no native dash/stroke-pattern API.  Widths are
+        // expressed as fractions of the x span so they scale with file size.
+        if let Some((mean, sd, k)) = anomaly_band {
+            let lo_band  = mean - k * sd;
+            let hi_band  = mean + k * sd;
+            let x_span   = (x_max - x_min).max(1.0);
+            let dash_on  = x_span * 0.008;   // 0.8 % of span filled
+            let dash_off = x_span * 0.004;   // 0.4 % gap
+
+            // Dashed threshold lines — translucent dark red.
+            let edge_color = RGBAColor(220, 60, 40, 0.55);
+            for &edge_y in &[lo_band, hi_band] {
+                let mut x = x_min;
+                while x < x_max {
+                    let x_end = (x + dash_on).min(x_max);
+                    chart.draw_series(std::iter::once(PathElement::new(
+                        vec![(x, edge_y), (x_end, edge_y)],
+                        ShapeStyle { color: edge_color, filled: false, stroke_width: 2 },
+                    )))?;
+                    x = x_end + dash_off;
+                }
+            }
+
+            // Mean reference line — solid, near-black, 3 px.
+            chart.draw_series(std::iter::once(PathElement::new(
+                vec![(x_min, mean), (x_max, mean)],
+                ShapeStyle::from(&C_MEAN).stroke_width(3),
+            )))?;
+
+            // ── right-edge labels ─────────────────────────────────────────
+            // Draw directly on `root` (i32 pixel coords) rather than through
+            // `chart` (f64 data coords) so Rectangle/Text compile cleanly.
+            //
+            // Known pixel layout for margin(80), y_label_area_size(220),
+            // x_label_area_size(150) on a 3200×1800 canvas:
+            //   plot_top    ≈ 150 px    plot_bottom ≈ 1570 px
+            //   plot_right  = 3200 - 80 = 3120 px
+            let plot_top_px:    f64 = 150.0;
+            let plot_bottom_px: f64 = (PUB_H as f64) - 230.0;
+            let plot_right_px:  i32 = (w as i32) - 86;
+            let plot_h_px = plot_bottom_px - plot_top_px;
+            let y_range   = (y_hi - y_lo).max(1e-12);
+
+            let data_y_to_px = |dy: f64| -> i32 {
+                (plot_top_px + (y_hi - dy) / y_range * plot_h_px) as i32
+            };
+
+            let font_ann  = ("sans-serif", 30).into_font().style(FontStyle::Italic);
+            let ann_color = RGBColor(190, 45, 25);
+
+            // "+/-Ks threshold" labels on both dashed lines.
+            // ASCII only: avoids missing-glyph boxes on Windows system fonts.
+            let k_str = if (k - k.round()).abs() < 0.05 {
+                format!("+/-{:.0}s threshold", k)
+            } else {
+                format!("+/-{:.1}s threshold", k)
+            };
+            let k_label_w = k_str.len() as i32 * 15 + 8;
+
+            for &edge_y in &[lo_band, hi_band] {
+                let py = data_y_to_px(edge_y);
+                root.draw(&Rectangle::new(
+                    [(plot_right_px - k_label_w - 6, py - 22),
+                     (plot_right_px,                  py +  6)],
+                    ShapeStyle { color: RGBAColor(255, 255, 255, 0.88),
+                                 filled: true, stroke_width: 0 },
+                ))?;
+                root.draw(&Text::new(
+                    k_str.as_str(),
+                    (plot_right_px - k_label_w - 4, py - 20),
+                    font_ann.clone().color(&ann_color),
+                ))?;
+            }
+
+            // "mean" label on the solid reference line.
+            let mean_label   = "mean";
+            let mean_label_w = mean_label.len() as i32 * 15 + 8;
+            let mean_py = data_y_to_px(mean);
+            root.draw(&Rectangle::new(
+                [(plot_right_px - mean_label_w - 6, mean_py - 22),
+                 (plot_right_px,                    mean_py +  6)],
+                ShapeStyle { color: RGBAColor(255, 255, 255, 0.88),
+                             filled: true, stroke_width: 0 },
+            ))?;
+            root.draw(&Text::new(
+                mean_label,
+                (plot_right_px - mean_label_w - 4, mean_py - 20),
+                font_ann.clone().color(&RGBColor(30, 30, 30)),
+            ))?;
+        }
+
+        // ── in-plot bookmark legend ───────────────────────────────────────
+        // Drawn on `root` (i32 pixel coords) in the top-right corner of the
+        // plot area.  Colour swatch + black label per unique bookmark group.
         let mut legend_entries: Vec<(String, (u8, u8, u8))> = Vec::new();
         for bm in bookmarks {
-            if !bm.label.is_empty() {
-                // Deduplicate: if the same label already appears (e.g. two
-                // single-range bookmarks with the same name), skip.
-                if !legend_entries.iter().any(|(l, _)| l == &bm.label) {
-                    legend_entries.push((bm.label.clone(), bm.color));
-                }
+            if !bm.label.is_empty()
+                && !legend_entries.iter().any(|(l, _)| l == &bm.label)
+            {
+                legend_entries.push((bm.label.clone(), bm.color));
             }
         }
 
         if !legend_entries.is_empty() {
-            // Legend box geometry — anchored in the right margin reserved above.
-            // Left edge = canvas_width − right_margin + padding.
-            let legend_x      = (w as i32) - 500;   // left edge of legend column
-            let legend_top    = 120i32;              // top of first entry
-            let swatch_size   = 28i32;               // colour square side
-            let row_h         = 52i32;               // height per entry row
-            let text_x_off    = swatch_size + 16;    // text starts after swatch
-            let font_legend_h = ("sans-serif", 28).into_font().style(FontStyle::Bold);
-            let font_legend   = ("sans-serif", 28).into_font();
+            // Pixel layout constants matching ChartBuilder config above.
+            let plot_x0: i32 = 300;               // margin(80) + y_label_area(220)
+            let plot_y0: i32 = 150;               // margin(80) + caption(~70)
+            let plot_x1: i32 = (w as i32) - 80;  // right margin
 
-            // Panel background — very light grey so it reads as a distinct box.
-            let panel_w  = 480i32;
-            let panel_h  = legend_entries.len() as i32 * row_h + 24;
+            let swatch_px = 32i32;
+            let pad       = 18i32;
+            let row_h     = 52i32;
+            let max_chars = 32usize;
+
+            // Auto-size box width to the longest label (~17 px/char at 30 pt).
+            let char_w_est  = 17i32;
+            let max_label_w = legend_entries.iter()
+                .map(|(l, _)| l.chars().count().min(max_chars) as i32 * char_w_est)
+                .max()
+                .unwrap_or(200);
+            let box_w = pad + swatch_px + pad + max_label_w + pad;
+            let box_h = pad + legend_entries.len() as i32 * row_h + pad / 2;
+
+            let inset  = 24i32;
+            let box_x1 = plot_x1 - inset;
+            let box_x0 = (box_x1 - box_w).max(plot_x0 + inset);
+            let box_y0 = plot_y0 + inset;
+            let box_y1 = box_y0 + box_h;
+
+            // White fill + dark border.
             root.draw(&Rectangle::new(
-                [
-                    (legend_x - 12, legend_top - 12),
-                    (legend_x + panel_w, legend_top + panel_h),
-                ],
-                ShapeStyle {
-                    color:        RGBAColor(230, 232, 238, 1.0),
-                    filled:       true,
-                    stroke_width: 0,
-                },
+                [(box_x0, box_y0), (box_x1, box_y1)],
+                ShapeStyle { color: RGBAColor(255, 255, 255, 0.93),
+                             filled: true, stroke_width: 0 },
             ))?;
-            // Panel border.
             root.draw(&Rectangle::new(
-                [
-                    (legend_x - 12, legend_top - 12),
-                    (legend_x + panel_w, legend_top + panel_h),
-                ],
-                ShapeStyle {
-                    color:        RGBAColor(150, 152, 160, 1.0),
-                    filled:       false,
-                    stroke_width: 2,
-                },
+                [(box_x0, box_y0), (box_x1, box_y1)],
+                ShapeStyle { color: RGBAColor(60, 62, 70, 1.0),
+                             filled: false, stroke_width: 2 },
             ))?;
 
-            // "BOOKMARKS" header.
-            root.draw(&Text::new(
-                "BOOKMARKS",
-                (legend_x, legend_top - 54),
-                ("sans-serif", 30).into_font()
-                    .style(FontStyle::Bold)
-                    .color(&RGBColor(80, 82, 90)),
-            ))?;
+            let font_leg = ("sans-serif", 30).into_font().style(FontStyle::Bold);
 
             for (row, (label, (r, g, b))) in legend_entries.iter().enumerate() {
-                let row_y = legend_top + row as i32 * row_h + 6;
+                let row_top = box_y0 + pad + row as i32 * row_h;
 
-                // Colour swatch.
+                let sw_x0 = box_x0 + pad;
+                let sw_y0 = row_top + (row_h - swatch_px) / 2;
+                let sw_x1 = sw_x0 + swatch_px;
+                let sw_y1 = sw_y0 + swatch_px;
+
+                // Colour swatch — solid fill + 1-px darkened border.
                 root.draw(&Rectangle::new(
-                    [(legend_x, row_y), (legend_x + swatch_size, row_y + swatch_size)],
+                    [(sw_x0, sw_y0), (sw_x1, sw_y1)],
+                    ShapeStyle { color: RGBAColor(*r, *g, *b, 1.0),
+                                 filled: true, stroke_width: 0 },
+                ))?;
+                root.draw(&Rectangle::new(
+                    [(sw_x0, sw_y0), (sw_x1, sw_y1)],
                     ShapeStyle {
-                        color:        RGBAColor(*r, *g, *b, 0.88),
-                        filled:       true,
-                        stroke_width: 0,
+                        color: RGBAColor(
+                            r.saturating_sub(50),
+                            g.saturating_sub(50),
+                            b.saturating_sub(50),
+                            1.0,
+                        ),
+                        filled: false, stroke_width: 1,
                     },
                 ))?;
-                // Swatch border.
-                root.draw(&Rectangle::new(
-                    [(legend_x, row_y), (legend_x + swatch_size, row_y + swatch_size)],
-                    ShapeStyle {
-                        color:        RGBAColor(*r, *g, *b, 1.0),
-                        filled:       false,
-                        stroke_width: 2,
-                    },
-                ))?;
 
-                // Truncate very long labels so they fit in the panel.
-                let max_chars = 28usize;
+                // Truncate label to fit the box width.
                 let display_label = if label.chars().count() > max_chars {
                     format!("{}…", &label[..label.char_indices()
                         .nth(max_chars)
@@ -370,21 +397,11 @@ pub fn export_line_chart_png(
                     label.clone()
                 };
 
-                // Label text — white shadow for legibility, then coloured text.
-                let text_x  = legend_x + text_x_off;
-                let text_y  = row_y + 4;
-                let text_col = RGBColor(*r, *g, *b);
-                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                    root.draw(&Text::new(
-                        display_label.clone(),
-                        (text_x + dx, text_y + dy),
-                        font_legend_h.clone().color(&WHITE),
-                    ))?;
-                }
+                // Black text — readable on white, no halo needed.
                 root.draw(&Text::new(
-                    display_label.clone(),
-                    (text_x, text_y),
-                    font_legend.clone().color(&text_col),
+                    display_label,
+                    (sw_x1 + pad, row_top + (row_h - 30) / 2),
+                    font_leg.clone().color(&BLACK),
                 ))?;
             }
         }
