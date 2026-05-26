@@ -2,12 +2,12 @@
  * @file      padding.rs
  * @brief     Automatic padding-region detection and bookmark generation.
  * @details   Scans a flat binary image for contiguous runs of a single fill
- *            byte value (0xC3 – erased flash, 0x00 – zero-fill) whose length
+ *            byte value (0xFF – erased flash, 0x00 – zero-fill) whose length
  *            meets a configurable minimum threshold.
  *
  *            Each fill-byte class is collapsed into a single MultiRangeBookmark
  *            that carries ALL qualifying runs of that class as sub-regions.
- *            This lets the bookmark panel show one "0xC3 padding" card (and one
+ *            This lets the bookmark panel show one "0xFF padding" card (and one
  *            "0x00 padding" card) instead of an unbounded number of individual
  *            entries, while still marking every individual run in the plots and
  *            hex view via `flatten_to_hex_bookmarks()`.
@@ -21,7 +21,7 @@
  *              1. Walk the byte slice tracking the current run (fill byte +
  *                 run length).
  *              2. On any byte transition, check whether the finished run
- *                 qualifies (fill byte is 0xC3 or 0x00, length ≥ min_run).
+ *                 qualifies (fill byte is 0xFF or 0x00, length ≥ min_run).
  *              3. Emit a PaddingRegion for each qualifying run.
  *              4. Group regions by fill byte → one MultiRangeBookmark per class.
  *
@@ -39,7 +39,7 @@ use crate::models::HexBookmark;
 
 // ── Visual identity for each fill-byte class ────────────────────────────────
 //
-// 0xC3  – matches the paper's description of erased flash (all bits set).
+// 0xFF  – matches the paper's description of erased flash (all bits set).
 //         Grey family: neutral, suggests "emptiness" or blank silicon.
 // 0x00  – zero-fill / linker-inserted padding.
 //         Steel-blue family: cold, structured, not data.
@@ -51,7 +51,7 @@ const COLOR_00: Color32 = Color32::from_rgb( 90, 140, 210);   // steel blue
 
 /// A single contiguous byte-range that belongs to a [`MultiRangeBookmark`].
 ///
-/// For auto-detected padding, `fill_byte` is 0xC3 or 0x00.
+/// For auto-detected padding, `fill_byte` is 0xFF or 0x00.
 /// For user-created multi-range bookmarks (see `app::BookmarkEditState`),
 /// `fill_byte` is 0x00 and carries no semantic meaning – only `start` / `len`
 /// are used.
@@ -61,7 +61,7 @@ pub struct PaddingRegion {
     pub start:     usize,
     /// Number of consecutive fill bytes.
     pub len:       usize,
-    /// The repeated byte value (0xC3, 0x00, or 0 for user ranges).
+    /// The repeated byte value (0xFF, 0x00, or 0 for user ranges).
     pub fill_byte: u8,
 }
 
@@ -121,7 +121,7 @@ impl MultiRangeBookmark {
 
 // ── Detection ────────────────────────────────────────────────────────────────
 
-/// Scan `data` for contiguous runs of 0xC3 or 0x00 that are at least
+/// Scan `data` for contiguous runs of 0xFF or 0x00 that are at least
 /// `min_run` bytes long.
 ///
 /// Returns one [`PaddingRegion`] per qualifying run, in offset order.
@@ -160,7 +160,7 @@ fn emit_if_qualifies(
     fill_byte: u8,
     min_run:   usize,
 ) {
-    if len >= min_run && (fill_byte == 0xC3 || fill_byte == 0x00) {
+    if len >= min_run && (fill_byte == 0xFF || fill_byte == 0x00) {
         out.push(PaddingRegion { start, len, fill_byte });
     }
 }
@@ -168,7 +168,7 @@ fn emit_if_qualifies(
 // ── MultiRangeBookmark construction ─────────────────────────────────────────
 
 /// Group a flat list of [`PaddingRegion`]s into at most two
-/// [`MultiRangeBookmark`]s – one per fill-byte class (0xC3, 0x00).
+/// [`MultiRangeBookmark`]s – one per fill-byte class (0xFF, 0x00).
 ///
 /// Classes that have no qualifying regions are omitted from the output.
 /// Regions within each group retain their original offset order.
@@ -177,7 +177,7 @@ pub fn build_multi_range_bookmarks(regions: &[PaddingRegion]) -> Vec<MultiRangeB
     let mut zero_regions: Vec<PaddingRegion> = Vec::new();
 
     for r in regions {
-        if r.fill_byte == 0xC3 {
+        if r.fill_byte == 0xFF {
             ff_regions.push(r.clone());
         } else {
             zero_regions.push(r.clone());
@@ -190,7 +190,7 @@ pub fn build_multi_range_bookmarks(regions: &[PaddingRegion]) -> Vec<MultiRangeB
         let total = ff_regions.iter().map(|r| r.len).sum::<usize>();
         out.push(MultiRangeBookmark {
             label:   format!(
-                "0xC3 {}  ×{}",
+                "0xFF {}  ×{}",
                 fmt_byte_count(total),
                 ff_regions.len()
             ),
@@ -219,7 +219,7 @@ pub fn build_multi_range_bookmarks(regions: &[PaddingRegion]) -> Vec<MultiRangeB
 /// one per sub-region, ready for the plot renderer and hex view.
 ///
 /// Each `HexBookmark` inherits the parent's colour and gets a label of the
-/// form `"0xC3 pad  (4.0 KiB)"` so it is self-describing in plot tooltips.
+/// form `"0xFF pad  (4.0 KiB)"` so it is self-describing in plot tooltips.
 ///
 /// Note: prefer `plots::draw_multi_range_bookmarks` for rendering; this
 /// function is retained for export, tests, and legacy callers.
@@ -229,7 +229,7 @@ pub fn flatten_to_hex_bookmarks(multi: &[MultiRangeBookmark]) -> Vec<HexBookmark
         // Determine the label prefix from the colour, falling back to a generic
         // marker for user-created groups whose fill_byte is 0.
         let kind = if mbm.color == COLOR_FF {
-            "0xC3"
+            "0xFF"
         } else if mbm.color == COLOR_00 {
             "0x00"
         } else {
@@ -294,12 +294,12 @@ mod tests {
 
     #[test]
     fn detects_ff_run() {
-        let data = vec![0x01, 0xC3, 0xC3, 0xC3, 0xC3, 0x02];
+        let data = vec![0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
         let regions = detect_padding_regions(&data, 4);
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].start,     1);
         assert_eq!(regions[0].len,       4);
-        assert_eq!(regions[0].fill_byte, 0xC3);
+        assert_eq!(regions[0].fill_byte, 0xFF);
     }
 
     #[test]
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn below_min_run_is_excluded() {
-        let data = vec![0xC3; 3];
+        let data = vec![0xFF; 3];
         let regions = detect_padding_regions(&data, 4);
         assert!(regions.is_empty());
     }
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn zero_min_run_returns_empty() {
-        let data = vec![0xC3; 100];
+        let data = vec![0xFF; 100];
         assert!(detect_padding_regions(&data, 0).is_empty());
     }
 
@@ -340,14 +340,14 @@ mod tests {
     #[test]
     fn groups_by_fill_byte() {
         let regions = vec![
-            PaddingRegion { start: 0,  len: 10, fill_byte: 0xC3 },
+            PaddingRegion { start: 0,  len: 10, fill_byte: 0xFF },
             PaddingRegion { start: 20, len: 5,  fill_byte: 0x00 },
-            PaddingRegion { start: 30, len: 8,  fill_byte: 0xC3 },
+            PaddingRegion { start: 30, len: 8,  fill_byte: 0xFF },
         ];
         let groups = build_multi_range_bookmarks(&regions);
         assert_eq!(groups.len(), 2);
 
-        let ff = groups.iter().find(|g| g.label.starts_with("0xC3")).unwrap();
+        let ff = groups.iter().find(|g| g.label.starts_with("0xFF")).unwrap();
         assert_eq!(ff.region_count(), 2);
         assert_eq!(ff.total_bytes(), 18);
 
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn end_offset() {
-        let r = PaddingRegion { start: 10, len: 5, fill_byte: 0xC3 };
+        let r = PaddingRegion { start: 10, len: 5, fill_byte: 0xFF };
         assert_eq!(r.end(), 15);
     }
 
