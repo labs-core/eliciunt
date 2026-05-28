@@ -175,7 +175,7 @@ pub fn render_statistics_tab(
             ("Reduced χ² ≫ 1.0",     "Byte distribution deviates from uniform — likely structured content."),
             ("Serial |ρ| ≫ 0",           "Adjacent bytes are linearly correlated — sequential structure present."),
             ("Hamming weight ≈ 4.0",      "Expected for uniform random bytes (bit probability ≈ 0.5)."),
-            ("Hamming weight ≈ 8.0",      "All bits set — consistent with erased flash (0xFF fill)."),
+            ("Hamming weight ≈ 8.0",      "All bits set — consistent with erased flash (0xC3 fill)."),
             ("Hamming weight ≈ 0.0",      "All bits clear — consistent with zero-fill padding."),
             ("KS p-value < 0.05",         "Global CDF diverges from uniform — byte usage is skewed."),
             ("Runs test p-value < 0.05",  "Non-random sequential structure — long runs or alternating patterns."),

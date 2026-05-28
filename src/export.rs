@@ -115,21 +115,44 @@ pub fn export_line_chart_png(
         };
 
         // ── font sizes scaled to 3200-wide canvas ─────────────────────────
-        let font_caption = ("sans-serif", 56).into_font().style(FontStyle::Bold);
-        let font_axis    = ("sans-serif", 40).into_font().style(FontStyle::Bold);
-        let font_tick    = ("sans-serif", 34).into_font();
+        let font_caption  = ("sans-serif", 56).into_font().style(FontStyle::Bold);
+        let font_axis     = ("sans-serif", 67).into_font().style(FontStyle::Bold);
+        let font_tick     = ("sans-serif", 57).into_font();
+        let font_tick_sz  = 57i32;   // keep in sync with font_tick
+        let font_axis_sz  = 67i32;   // keep in sync with font_axis
+
+        // Dynamically size the y-label strip so the rotated axis-description
+        // never collides with the tick numbers, regardless of value magnitude.
+        //   strip = (widest tick label in chars × ~0.55 char-width factor)
+        //         + one line-height for the axis description
+        //         + a small padding gap
+        let max_y_abs      = y_hi.abs().max(y_lo.abs());
+        let max_tick_chars = format!("{:.3}", max_y_abs).len() as i32;
+        let char_w_est     = (font_tick_sz as f64 * 0.55) as i32;
+        let y_label_area   = (max_tick_chars * char_w_est + font_axis_sz + 35).max(205) as u32;
 
         let mut chart = ChartBuilder::on(&root)
             .caption(title, font_caption.color(&RGBColor(20, 20, 20)))
             .margin(80)
-            .x_label_area_size(150)
-            .y_label_area_size(220)
+            .x_label_area_size(125)
+            .y_label_area_size(y_label_area)
             .build_cartesian_2d(x_min..x_max, y_lo..y_hi)?;
 
         // ── Tufte-style mesh: horizontal reference lines only ─────────────
+        // Strip from the y-axis label any word already present in the title
+        // so the same term (e.g. "Entropy") is never shown twice.
+        let y_desc_deduped: String = {
+            let title_lc = title.to_lowercase();
+            let words: Vec<&str> = y_axis_label
+                .split_whitespace()
+                .filter(|w| !title_lc.contains(&w.to_lowercase() as &str))
+                .collect();
+            words.join(" ")
+        };
+
         chart.configure_mesh()
             .x_desc(x_axis_label)
-            .y_desc(y_axis_label)
+            .y_desc(y_desc_deduped.as_str())
             .x_labels(12)
             .y_labels(10)
             .x_label_formatter(&|v| format!("0x{:X}", *v as usize))
@@ -264,7 +287,7 @@ pub fn export_line_chart_png(
                 (plot_top_px + (y_hi - dy) / y_range * plot_h_px) as i32
             };
 
-            let font_ann  = ("sans-serif", 30).into_font().style(FontStyle::Italic);
+            let font_ann  = ("sans-serif", 47).into_font().style(FontStyle::Italic);
             let ann_color = RGBColor(190, 45, 25);
 
             // "+/-Ks threshold" labels on both dashed lines.
@@ -358,7 +381,7 @@ pub fn export_line_chart_png(
                              filled: false, stroke_width: 2 },
             ))?;
 
-            let font_leg = ("sans-serif", 30).into_font().style(FontStyle::Bold);
+            let font_leg = ("sans-serif", 47).into_font().style(FontStyle::Bold);
 
             for (row, (label, (r, g, b))) in legend_entries.iter().enumerate() {
                 let row_top = box_y0 + pad + row as i32 * row_h;
@@ -434,19 +457,31 @@ pub fn export_bar_chart_png(
         let spike_thresh  = uniform_level * UNIFORM_SPIKE_RATIO;
 
         let font_caption = ("sans-serif", 52).into_font().style(FontStyle::Bold);
-        let font_axis    = ("sans-serif", 38).into_font();
-        let font_tick    = ("sans-serif", 32).into_font();
+        let font_axis    = ("sans-serif", 65).into_font();
+        let font_tick    = ("sans-serif", 55).into_font();
+        let font_tick_sz = 55i32;
+        let font_axis_sz = 65i32;
+
+        // Same dynamic y-label area calculation as the line chart.
+        let max_tick_chars = {
+            let n = max_count;
+            if      n >= 1_000_000.0 { format!("{:.1}M", n / 1_000_000.0).len() }
+            else if n >= 1_000.0     { format!("{:.1}k", n / 1_000.0).len() }
+            else                     { format!("{}", n as usize).len() }
+        } as i32;
+        let char_w_est   = (font_tick_sz as f64 * 0.55) as i32;
+        let y_label_area = (max_tick_chars * char_w_est + font_axis_sz + 35).max(193) as u32;
 
         let mut chart = ChartBuilder::on(&root)
             .caption(title, font_caption)
             .margin(60)
-            .x_label_area_size(130)
-            .y_label_area_size(200)
+            .x_label_area_size(110)
+            .y_label_area_size(y_label_area)
             .build_cartesian_2d(0i32..256i32, 0.0f64..max_count * 1.12)?;
 
         chart.configure_mesh()
             .x_desc("Byte value")
-            .y_desc("Count")
+            .y_desc(if title.to_lowercase().contains("count") { "" } else { "Count" })
             .x_labels(9)
             .y_labels(8)
             .x_label_formatter(&|v| format!("0x{:02X}", *v as u8))

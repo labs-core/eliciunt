@@ -386,7 +386,7 @@ pub struct App {
     /// Minimum contiguous run length (bytes) for a fill region to be flagged.
     pub auto_bookmark_min_run:  usize,
     /// Cached per-file auto-bookmarks stored as grouped MultiRangeBookmarks
-    /// (one group per fill-byte class: 0xFF, 0x00).  Recomputed whenever the
+    /// (one group per fill-byte class: 0xC3, 0x00).  Recomputed whenever the
     /// file is analysed or min_run changes.
     auto_bookmarks:             HashMap<usize, Vec<MultiRangeBookmark>>,
 }
@@ -811,7 +811,7 @@ impl App {
                 ui.label(
                     RichText::new(format!(
                         "{auto_group_count} group(s)  ·  {auto_region_count} region(s)\
-                         \n(grey = 0xFF erased flash  ·  blue = 0x00 zero-fill)"
+                         \n(grey = 0xC3 erased flash  ·  blue = 0x00 zero-fill)"
                     ))
                     .size(10.0)
                     .color(pal::MUTED)
