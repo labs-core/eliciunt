@@ -1,7 +1,7 @@
 /**
  * @file      main.rs
  * @brief     Application entry point.
- * @details   Configures the eframe native window and launches the ELICIUNT
+ * @details   Configures the eframe native window and launches the ELICIO
  *            binary-analysis GUI.
  *
  * @copyright  (C) Core Labs
@@ -29,7 +29,7 @@ use app::App;
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("ELICIUNT")
+            .with_title("ELICIO")
             .with_inner_size([1440.0, 880.0])
             .with_min_inner_size([900.0, 600.0]),
         follow_system_theme: false,
@@ -37,7 +37,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "ELICIUNT",
+        "ELICIO",
         native_options,
         Box::new(|_cc| Box::new(App::default())),
     )

@@ -1,10 +1,10 @@
 [package]
-name    = "eliciunt"
+name    = "ELICIO"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "eliciunt"
+name = "ELICIO"
 path = "src/main.rs"
 
 [dependencies]
